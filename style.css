@@ -199,6 +199,7 @@ border:1px solid var(--line); background:#fff; border-radius:4px; font-size:0.7e
 .status-buttons button.active.course{ background:#3f6fd6; color:#fff; border-color:#3f6fd6; }
 .status-buttons button.active.transfer{ background:#2e8b57; color:#fff; border-color:#2e8b57; }
 .status-buttons button.active.absent{ background:#c0392b; color:#fff; border-color:#c0392b; }
+.status-buttons button.js-solo-toggle.active{ background:#8e44ad; color:#fff; border-color:#8e44ad; }
 
 .group-row{ background:#faf8ff; }
 .group-row .cell{ border-bottom:1px solid #e6def5; min-height:46px; }
