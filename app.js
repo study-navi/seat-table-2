@@ -3286,6 +3286,7 @@ document.addEventListener("DOMContentLoaded", init);
       }
     }
     try { localStorage.setItem("seat-table2-v1", JSON.stringify(raw)); } catch(e){ return; }
+    try { sessionStorage.setItem("seat-table2-restore-date", date); } catch(e){}
     location.reload();
   }
   function inject(){
