@@ -286,21 +286,35 @@ const dateLabel = `${dateObj.getFullYear()}年${dateObj.getMonth()+1}月${dateOb
 
 el.innerHTML = `
 <div class="panel page-head">
-<p class="eyebrow">LESSON SEATING</p>
+<div class="seat-date-bar">
 <h2>${dateLabel}</h2>
-${imagesHtml()}
-<div class="seat-toolbar">
 <label class="date-field">日付
 <input type="date" id="datePicker" value="${currentDate}">
 </label>
+</div>
+${imagesHtml()}
+<div class="seat-toolbar">
+<div class="toolbar-group">
+<span class="toolbar-label">日付操作</span>
 <div class="btn-row">
 <button class="btn" id="btnCopyLastWeek">先週をコピー</button>
-<button class="btn" id="btnImportEweb">eWebから読み込む</button>
+</div>
+</div>
+<div class="toolbar-group">
+<span class="toolbar-label">座席操作</span>
+<div class="btn-row js-seat-actions">
+<button class="btn primary" id="btnAddBlock">＋ 授業枠を追加</button>
 <button class="btn danger" id="btnDeleteGroupRows">この日の集団行を削除</button>
 <button class="btn danger" id="btnDeleteAll">この日をすべて削除</button>
+</div>
+</div>
+<div class="toolbar-group">
+<span class="toolbar-label">共有操作</span>
+<div class="btn-row js-share-actions">
+<button class="btn" id="btnImportEweb">eWebから読み込む</button>
 <button class="btn" id="btnImportImage">画像から取り込み</button>
 <button class="btn" id="btnPrint">A3横で印刷</button>
-<button class="btn primary" id="btnAddBlock">＋ 授業枠を追加</button>
+</div>
 </div>
 </div>
 </div>
@@ -2981,7 +2995,7 @@ document.addEventListener("DOMContentLoaded", init);
     showModal(url, url.length);
   }
   function inject(){
-    var bars = document.querySelectorAll("#view-seat .btn-row"), i;
+    var bars = document.querySelectorAll("#view-seat .js-share-actions"), i;
     for (i = 0; i < bars.length; i++){
       var bar = bars[i];
       if (bar.querySelector(".js-qr-share-day")) continue;
@@ -3083,7 +3097,7 @@ document.addEventListener("DOMContentLoaded", init);
     try { localStorage.setItem(SYNC_KEY, on ? "1" : "0"); } catch(e){}
   }
   function injectToggle(){
-    var bars = document.querySelectorAll("#view-seat .btn-row"), i;
+    var bars = document.querySelectorAll("#view-seat .js-seat-actions"), i;
     for (i = 0; i < bars.length; i++){
       var bar = bars[i];
       if (bar.querySelector(".js-sync-toggle-wrap")) continue;
@@ -3239,7 +3253,7 @@ document.addEventListener("DOMContentLoaded", init);
     }
   }
   function inject(){
-    var bars = document.querySelectorAll("#view-seat .btn-row"), i;
+    var bars = document.querySelectorAll("#view-seat .js-share-actions"), i;
     for (i = 0; i < bars.length; i++){
       var bar = bars[i];
       if (bar.querySelector(".js-code-send")) continue;
@@ -3310,7 +3324,7 @@ document.addEventListener("DOMContentLoaded", init);
     location.reload();
   }
   function inject(){
-    var bars = document.querySelectorAll("#view-seat .btn-row"), i;
+    var bars = document.querySelectorAll("#view-seat .js-seat-actions"), i;
     for (i = 0; i < bars.length; i++){
       var bar = bars[i];
       if (bar.querySelector(".js-sort-by-seat-day")) continue;
