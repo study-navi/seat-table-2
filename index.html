@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>座席表｜授業配置管理</title>
-<link rel="stylesheet" href="style.css?v=1786017179008">
+<link rel="stylesheet" href="https://study-navi.github.io/seat-table/style.css">
 </head>
 <body>
 <header class="topbar">
@@ -40,6 +40,22 @@
 <div id="toast" class="toast" hidden></div>
 <div id="modalRoot"></div>
 
-<script src="app.js?v=1786017179008"></script>
+<script>
+  (function(){
+    function remap(key){ return key.replace(/^seat-table-/, "seat-table2-"); }
+    window.__seatStorageOverride = {
+      getItem: function(k){ return window.localStorage.getItem(remap(k)); },
+      setItem: function(k, v){ return window.localStorage.setItem(remap(k), v); },
+      removeItem: function(k){ return window.localStorage.removeItem(remap(k)); }
+    };
+    window.__seatSessionStorageOverride = {
+      getItem: function(k){ return window.sessionStorage.getItem(remap(k)); },
+      setItem: function(k, v){ return window.sessionStorage.setItem(remap(k), v); },
+      removeItem: function(k){ return window.sessionStorage.removeItem(remap(k)); }
+    };
+    window.__seatCodePrefix = "kyowa:";
+  })();
+</script>
+<script src="https://study-navi.github.io/seat-table/app.js"></script>
 </body>
 </html>
