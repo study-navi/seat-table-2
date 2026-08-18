@@ -1,10 +1,19 @@
+/* ==========================================================
+   複数教室に展開するための仕組み。
+   新しい教室のページは、このapp.js/style.cssを直接読み込みつつ、
+   自分のindex.html側で window.__seatStorageOverride 等を
+   先に定義しておくことで、保存先や合言葉の区別を上書きできる。
+   何も上書きしなければ、これまで通りの動作（柊山校・共和校）。
+   ========================================================== */
+var STORAGE = window.__seatStorageOverride || window.localStorage;
+var SESSION_STORAGE = window.__seatSessionStorageOverride || window.sessionStorage;
 /* =========================================================
 座席表アプリ本体
-- localStorage キー "seat-table2-v1" は旧サイトと同じ構造を維持
+- localStorage キー "seat-table-v1" は旧サイトと同じ構造を維持
 （旧サイトからエクスポートしたバックアップJSONをそのまま読み込めるようにするため）
 ========================================================= */
 
-const STORAGE_KEY = "seat-table2-v1";
+const STORAGE_KEY = "seat-table-v1";
 
 const WEEKDAY_LABELS = ["日","月","火","水","木","金","土"];
 
@@ -42,7 +51,7 @@ function uid(){ return Math.random().toString(36).slice(2,9); }
 /* ---------------- persistence ---------------- */
 function loadState(){
 let raw = null;
-try{ raw = localStorage.getItem(STORAGE_KEY); }catch(e){}
+try{ raw = STORAGE.getItem(STORAGE_KEY); }catch(e){}
 let data;
 try{ data = raw ? JSON.parse(raw) : null; }catch(e){ data = null; }
 data = migrate(data || {});
@@ -125,7 +134,7 @@ let saveTimer = null;
 function saveState(){
 setSaveIndicator("saving");
 try{
-localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+STORAGE.setItem(STORAGE_KEY, JSON.stringify(state));
 clearTimeout(saveTimer);
 saveTimer = setTimeout(()=> setSaveIndicator("ok"), 250);
 }catch(e){
@@ -314,6 +323,7 @@ ${imagesHtml()}
 <button class="btn" id="btnImportEweb">eWebから読み込む</button>
 <button class="btn" id="btnImportImage">画像から取り込み</button>
 <button class="btn" id="btnPrint">A3横で印刷</button>
+<button class="btn" id="btnPrintMulti">複数日を印刷</button>
 </div>
 </div>
 </div>
@@ -336,6 +346,8 @@ ${imagesHtml()}
 <span><span class="swatch course"></span>講習</span>
 <span><span class="swatch transfer"></span>振替</span>
 <span><span class="swatch absent"></span>欠席</span>
+<span><span class="swatch solo"></span>1対1</span>
+<span><span class="swatch trial"></span>体験授業</span>
 <span>生徒名の下のボタンでワンタップ切り替え</span>
 </div>
 
@@ -373,6 +385,7 @@ saveState(); renderSeatView();
 });
 });
 document.getElementById("btnPrint").addEventListener("click", ()=> window.print());
+document.getElementById("btnPrintMulti").addEventListener("click", openMultiDayPrintModal);
 document.getElementById("btnImportImage").addEventListener("click", openImageImportModal);
 document.getElementById("btnImportEweb").addEventListener("click", openEwebImportModal);
 document.getElementById("btnCopyLastWeek").addEventListener("click", openCopyLastWeekModal);
@@ -413,8 +426,51 @@ wrap.innerHTML = day.blocks.map((block, bi)=> blockHtml(block, bi)).join("");
 day.blocks.forEach((block, bi)=> bindBlockEvents(day, block, bi));
 }
 
-function blockHtml(block, bi){
-const seatRows = block.seats.map((seat,si)=> seatRowHtml(block, seat, si)).join("");
+function uniqueBlockTeachers(block){
+const names = [];
+const seen = {};
+function add(raw){
+const display = String(raw || "").replace(/[\s\u3000]+/g, " ").trim();
+if(!display) return;
+if(seen[display]) return;
+seen[display] = true;
+names.push(display);
+}
+(block.seats || []).forEach(seat=> add(seat && seat.teacher));
+(block.groupRows || []).forEach(row=> add(row && row.teacher));
+return names;
+}
+
+function blockTeachersLabel(block){
+const names = uniqueBlockTeachers(block);
+return names.length ? names.join(" / ") : "講師未設定";
+}
+
+function refreshBlockTeachersHeading(blockEl, block){
+const el = blockEl && blockEl.querySelector(".block-teachers");
+if(!el) return;
+el.textContent = blockTeachersLabel(block);
+}
+
+function normSoloName(s){ return String(s || "").replace(/[\s\u3000]+/g, ""); }
+function stripSoloBrackets(subj){ return String(subj || "").replace(/[<\uFF1C][^>\uFF1E]*[>\uFF1E]/g, "").trim(); }
+function soloComboKey(name, subj){ return normSoloName(name) + "\u2016" + normSoloName(stripSoloBrackets(subj)); }
+function loadSoloMapForDate(dateStr){
+try{
+const all = JSON.parse(STORAGE.getItem("seat-table-solo") || "{}") || {};
+return all[dateStr] || {};
+}catch(e){ return {}; }
+}
+/* 1対1の斜線。各セル内のSVG実要素として置く（背景グラフィックOFFでも印刷される）。
+   パターンIDはセルごとに一意にして、hiddenな別画面の同名IDに引っ張られないようにする。 */
+function soloSlashMarkHtml(){
+const id = "solo-slash-p-" + uid();
+const clip = id + "-clip";
+return `<svg class="solo-slash-mark" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false" overflow="hidden"><defs><clipPath id="${clip}" clipPathUnits="objectBoundingBox"><rect width="1" height="1"/></clipPath><pattern id="${id}" patternUnits="userSpaceOnUse" width="18" height="18"><path d="M-2 20 L20 -2" stroke="#000" stroke-width="0.9" fill="none"/></pattern></defs><rect width="100%" height="100%" fill="url(#${id})" clip-path="url(#${clip})"/></svg>`;
+}
+
+function blockHtml(block, bi, dateStr){
+const seatRows = block.seats.map((seat,si)=> seatRowHtml(block, seat, si, dateStr)).join("");
 const groupRows = block.groupRows.map((g,gi)=> groupRowHtml(block, g, gi)).join("");
 
 return `
@@ -422,6 +478,7 @@ return `
 <div class="block-head">
 <div class="block-head-left">
 <span class="block-index">枠${bi+1}</span>
+<div class="block-teachers">${escapeHtml(blockTeachersLabel(block))}</div>
 <div class="time-input">
 <span>時間帯</span>
 <input type="time" class="js-time-start" value="${(block.time.split("〜")[0]||"").trim()}">
@@ -469,24 +526,34 @@ ${groupRows}
 </div>`;
 }
 
-function seatRowHtml(block, seat, si){
+function seatRowHtml(block, seat, si, dateStr){
 const teacherOptions = `<option value="">—</option>` + state.teachers.map(t=>`<option value="${escapeHtml(t.name)}" ${seat.teacher===t.name?"selected":""}>${escapeHtml(t.name)}</option>`).join("");
 const studOpts = (selected)=> `<option value="">生徒を選択</option>` + state.students.map(s=>`<option value="${escapeHtml(s.name)}" ${selected===s.name?"selected":""}>${escapeHtml(s.name)}</option>`).join("");
+const soloMap = loadSoloMapForDate(dateStr || currentDate);
+const leftName = normSoloName(seat.left && seat.left.student);
+const rightName = normSoloName(seat.right && seat.right.student);
+const leftSolo = !!(leftName && soloMap[soloComboKey(leftName, seat.left && seat.left.subject)]);
+const rightSolo = !!(rightName && soloMap[soloComboKey(rightName, seat.right && seat.right.subject)]);
+const blockRight = leftSolo && !rightName;
+const blockLeft = rightSolo && !leftName;
 
-const sideHtml = (side, key)=>`
-<div class="cell">
+const sideHtml = (side, key, blocked)=>`
+<div class="cell${blocked?" solo-blocked":""}">
 <input list="subjectList" class="subject-select js-subject" data-side="${key}" value="${escapeHtml(side.subject)}" placeholder="—">
+${blocked?soloSlashMarkHtml():""}
 </div>
-<div class="cell">
+<div class="cell${blocked?" solo-blocked":""}">
 <input type="text" class="grade-input js-grade" data-side="${key}" value="${escapeHtml(side.grade)}" placeholder="学年">
+${blocked?soloSlashMarkHtml():""}
 </div>
-<div class="cell student-cell status-${side.status} js-student-cell" data-side="${key}">
+<div class="cell student-cell status-${side.status} js-student-cell${blocked?" solo-blocked":""}" data-side="${key}">
 <select class="student-select js-student" data-side="${key}">${studOpts(side.student)}</select>
 <div class="status-buttons">
 <button type="button" class="js-status ${side.status==='course'?'active course':''}" data-side="${key}" data-status="course">講習</button>
 <button type="button" class="js-status ${side.status==='transfer'?'active transfer':''}" data-side="${key}" data-status="transfer">振替</button>
 <button type="button" class="js-status ${side.status==='absent'?'active absent':''}" data-side="${key}" data-status="absent">欠席</button>
 </div>
+${blocked?soloSlashMarkHtml():""}
 </div>`;
 
 return `
@@ -501,8 +568,8 @@ return `
 <div class="cell teacher-col">
 <select class="js-teacher">${teacherOptions}</select>
 </div>
-${sideHtml(seat.left,"left")}
-${sideHtml(seat.right,"right")}
+${sideHtml(seat.left,"left", blockLeft)}
+${sideHtml(seat.right,"right", blockRight)}
 </div>
 `;
 }
@@ -614,7 +681,11 @@ return;
 }
 if(t.classList.contains("js-teacher")){
 const idx = seatRowIndex(t);
-if(idx>-1){ block.seats[idx].teacher = t.value; saveState(); }
+if(idx>-1){
+block.seats[idx].teacher = t.value;
+saveState();
+refreshBlockTeachersHeading(t.closest(".lesson-block"), block);
+}
 return;
 }
 if(t.classList.contains("js-subject")){
@@ -637,7 +708,11 @@ return;
 }
 if(t.classList.contains("js-g-teacher")){
 const idx = groupRowIndex(t);
-if(idx>-1){ block.groupRows[idx].teacher = t.value; saveState(); }
+if(idx>-1){
+block.groupRows[idx].teacher = t.value;
+saveState();
+refreshBlockTeachersHeading(t.closest(".lesson-block"), block);
+}
 return;
 }
 if(t.classList.contains("js-g-name")){
@@ -722,7 +797,7 @@ return String(s || "").replace(/[\s\u3000]+/g, "");
 
 function isSeatNumberSyncEnabled(){
 try{
-const v = localStorage.getItem("seat-table2-sync-enabled");
+const v = STORAGE.getItem("seat-table-sync-enabled");
 return v === null ? true : v === "1";
 }catch(e){
 return true;
@@ -855,6 +930,46 @@ const kind = m[1], code = m[2];
 const subject = EWEB_SUBJECT_ABBR[code] || code;
 return {subject, status: kind === "講" ? "course" : "normal"};
 }
+/* 1対1は通＋山括弧のみ。通(数)は1対2、講(数)は講習、集団は groups 側。 */
+function isEwebSoloSubject(raw){
+const s = String(raw || "").trim();
+return /^通\s*[<\uFF1C][^>\uFF1E]+[>\uFF1E]$/.test(s);
+}
+function ewebItemSubject(it){
+if(!it) return "";
+if(it.subject) return it.subject;
+if(it.raw && it.raw.subject_name) return it.raw.subject_name;
+if(it.subject_name) return it.subject_name;
+return "";
+}
+function ewebSoloDisplaySubject(raw){
+const parsed = parseEwebSubject(raw);
+if(parsed.subject && parsed.subject !== String(raw || "").trim()) return parsed.subject;
+const m = String(raw || "").trim().match(/^通\s*[<\uFF1C]([^>\uFF1E]+)[>\uFF1E]$/);
+if(!m) return parsed.subject;
+return EWEB_SUBJECT_ABBR[m[1]] || m[1];
+}
+function soloMapFromEwebPayload(payload){
+const map = {};
+if(!payload) return map;
+const items = payload.items || payload.schedules || [];
+items.forEach(it=>{
+const rawSubj = ewebItemSubject(it);
+if(!isEwebSoloSubject(rawSubj)) return;
+const name = it.student_name || "";
+if(!name) return;
+map[soloComboKey(name, ewebSoloDisplaySubject(rawSubj))] = 1;
+});
+return map;
+}
+function saveEwebSoloMap(dateStr, map){
+if(!dateStr) return;
+try{
+const all = JSON.parse(STORAGE.getItem("seat-table-solo") || "{}") || {};
+all[dateStr] = map || {};
+STORAGE.setItem("seat-table-solo", JSON.stringify(all));
+}catch(e){}
+}
 function guessSubjectFromName(name){
 const s = name || "";
 for(const [abbr, full] of Object.entries(EWEB_SUBJECT_ABBR)){
@@ -966,9 +1081,11 @@ confirmDialog(`${dateStr} の座席表を、eWebのデータで上書きしま�
 state.days[dateStr] = newDay;
 migrate(state);
 currentDate = dateStr;
+saveEwebSoloMap(dateStr, soloMapFromEwebPayload(payload));
 saveState();
 renderTabs();
 renderSeatView();
+if(window.__repaintSolo){ try{ window.__repaintSolo(); }catch(e){} }
 showToast(`${dateStr} の座席表をeWebから取り込みました`);
 });
 });
@@ -1383,6 +1500,139 @@ dragging = null;
 });
 }
 
+function formatJaDateLabel(dateStr){
+const wd = weekdayOf(dateStr);
+const d = new Date(dateStr+"T00:00:00");
+if(isNaN(d.getTime())) return dateStr;
+return `${d.getFullYear()}年${d.getMonth()+1}月${d.getDate()}日（${WEEKDAY_LABELS[wd]}）`;
+}
+
+function dayHasPrintableContent(day){
+if(!day || !Array.isArray(day.blocks) || !day.blocks.length) return false;
+return day.blocks.some(block=>{
+if(!block) return false;
+if(block.time && block.time !== "時間を入力" && /[0-9]/.test(block.time)) return true;
+if((block.groupRows || []).some(g=> g && (g.name || g.teacher || g.subject || (g.students && g.students.length)))) return true;
+return (block.seats || []).some(seat=>{
+if(!seat) return false;
+if(seat.teacher) return true;
+const left = seat.left || {};
+const right = seat.right || {};
+return !!(left.student || left.subject || right.student || right.subject);
+});
+});
+}
+
+function listPrintableDates(){
+return Object.keys(state.days || {}).filter(dateStr=> dayHasPrintableContent(state.days[dateStr])).sort();
+}
+
+function datesInRange(dates, start, end){
+return dates.filter(dateStr=>{
+if(start && dateStr < start) return false;
+if(end && dateStr > end) return false;
+return true;
+});
+}
+
+function printDayPageHtml(dateStr){
+const day = state.days[dateStr];
+if(!day) return "";
+const blocks = (day.blocks || []).map((block, bi)=> blockHtml(block, bi, dateStr)).join("");
+return `<div class="print-preview-page multi-print-page" data-solo-date="${escapeHtml(dateStr)}">
+${imagesHtml()}
+<div class="page-head" style="margin-bottom:4mm;">
+<h2 style="font-size:16pt;margin:0;">${escapeHtml(formatJaDateLabel(dateStr))}</h2>
+</div>
+<div class="blocks preview-blocks">${blocks || `<div class="empty-note">この日の授業枠はありません。</div>`}</div>
+</div>`;
+}
+
+function runMultiDayPrint(dates){
+const root = document.getElementById("multiDayPrint");
+if(!root || !dates.length) return;
+root.innerHTML = dates.map(printDayPageHtml).join("");
+document.body.classList.add("multi-day-print");
+if(window.__repaintSolo){ try{ window.__repaintSolo(); }catch(e){} }
+const cleanup = ()=>{
+document.body.classList.remove("multi-day-print");
+root.innerHTML = "";
+window.removeEventListener("afterprint", cleanup);
+};
+window.addEventListener("afterprint", cleanup);
+window.print();
+}
+
+function openMultiDayPrintModal(){
+const allDates = listPrintableDates();
+if(!allDates.length){
+showToast("印刷できる座席表データがありません", true);
+return;
+}
+const displayed = currentDate;
+const defaultStart = displayed;
+const defaultEnd = displayed;
+openModal(`
+<h3>複数日を印刷</h3>
+<p>データがある日付だけを表示しています。空の日付は含まれません。1日につき1ページで、日付順に印刷します。</p>
+<div class="multi-print-range">
+<label>開始日 <input type="date" id="multiPrintStart" value="${defaultStart}"></label>
+<label>終了日 <input type="date" id="multiPrintEnd" value="${defaultEnd}"></label>
+</div>
+<div class="multi-print-summary" id="multiPrintSummary"></div>
+<div class="multi-date-list" id="multiDateList"></div>
+<div class="modal-actions">
+<button class="btn" id="modalCancel">キャンセル</button>
+<button class="btn primary" id="modalConfirm">印刷する</button>
+</div>
+`, (modal)=>{
+const startEl = modal.querySelector("#multiPrintStart");
+const endEl = modal.querySelector("#multiPrintEnd");
+const listEl = modal.querySelector("#multiDateList");
+const summaryEl = modal.querySelector("#multiPrintSummary");
+const confirmBtn = modal.querySelector("#modalConfirm");
+const refreshList = ()=>{
+const start = startEl.value;
+const end = endEl.value;
+if(start && end && start > end){
+listEl.innerHTML = `<p class="sub">開始日が終了日より後になっています。</p>`;
+summaryEl.textContent = "対象 0日 / 印刷 0ページ";
+confirmBtn.disabled = true;
+return;
+}
+const visible = datesInRange(allDates, start, end);
+if(!visible.length){
+listEl.innerHTML = `<p class="sub">この期間に印刷できる日付はありません。</p>`;
+summaryEl.textContent = "対象 0日 / 印刷 0ページ";
+confirmBtn.disabled = true;
+return;
+}
+listEl.innerHTML = visible.map(dateStr=>`
+<label class="opt"><input type="checkbox" class="js-multi-date" value="${escapeHtml(dateStr)}" checked>
+<span>${escapeHtml(formatJaDateLabel(dateStr))}</span></label>
+`).join("");
+updateSummary();
+};
+const selectedDates = ()=> Array.from(listEl.querySelectorAll(".js-multi-date:checked")).map(el=> el.value).sort();
+const updateSummary = ()=>{
+const n = selectedDates().length;
+summaryEl.textContent = `対象 ${n}日 / 印刷 ${n}ページ（1日1ページ）`;
+confirmBtn.disabled = n === 0;
+};
+listEl.addEventListener("change", updateSummary);
+startEl.addEventListener("change", refreshList);
+endEl.addEventListener("change", refreshList);
+refreshList();
+modal.querySelector("#modalCancel").addEventListener("click", closeModal);
+confirmBtn.addEventListener("click", ()=>{
+const dates = selectedDates();
+if(!dates.length){ showToast("印刷する日付を選んでください", true); return; }
+closeModal();
+setTimeout(()=> runMultiDayPrint(dates), 50);
+});
+});
+}
+
 function renderPrintPreviewView(){
 const el = document.getElementById("view-print");
 const ps = state.printSettings;
@@ -1410,6 +1660,7 @@ el.innerHTML = `
 </label>
 <div class="btn-row">
 <button class="btn primary" id="btnPrintFromPreview">この内容で印刷する</button>
+<button class="btn" id="btnPrintMultiFromPreview">複数日を印刷</button>
 </div>
 </div>
 </div>
@@ -1438,13 +1689,13 @@ el.innerHTML = `
 </div>
 
 <div class="print-preview-wrap">
-<div class="print-preview-page" id="previewPage">
+<div class="print-preview-page" id="previewPage" data-solo-date="${escapeHtml(currentDate)}">
 ${imagesHtml()}
 <div class="page-head" style="margin-bottom:4mm;">
 <h2 style="font-size:16pt;margin:0;">${(()=>{ const d=new Date(currentDate+"T00:00:00"); return `${d.getFullYear()}年${d.getMonth()+1}月${d.getDate()}日（${WEEKDAY_LABELS[weekdayOf(currentDate)]}）`; })()}</h2>
 </div>
 <div class="blocks preview-blocks" id="previewBlocks">
-${day.blocks.map((block,bi)=> blockHtml(block, bi)).join("")}
+${day.blocks.map((block,bi)=> blockHtml(block, bi, currentDate)).join("")}
 </div>
 </div>
 </div>
@@ -1452,12 +1703,14 @@ ${day.blocks.map((block,bi)=> blockHtml(block, bi)).join("")}
 
 applyPrintCssVars();
 bindImageDrag();
+if(window.__repaintSolo){ try{ window.__repaintSolo(); }catch(e){} }
 
 document.getElementById("previewDatePicker").addEventListener("change", (e)=>{
 currentDate = e.target.value || todayStr();
 renderPrintPreviewView();
 });
 document.getElementById("btnPrintFromPreview").addEventListener("click", ()=> window.print());
+document.getElementById("btnPrintMultiFromPreview").addEventListener("click", openMultiDayPrintModal);
 document.getElementById("rangeSubjectSize").addEventListener("input", (e)=>{
 ps.subjectSize = Number(e.target.value);
 document.getElementById("valSubjectSize").textContent = ps.subjectSize;
@@ -1541,7 +1794,7 @@ const blob = new Blob([JSON.stringify(state, null, 2)], {type:"application/json"
 const url = URL.createObjectURL(blob);
 const a = document.createElement("a");
 const stamp = todayStr();
-a.href = url; a.download = `seat-table2-backup-${stamp}.json`;
+a.href = url; a.download = `seat-table-backup-${stamp}.json`;
 document.body.appendChild(a); a.click(); a.remove();
 showToast("バックアップをダウンロードしました");
 });
@@ -1583,14 +1836,14 @@ document.addEventListener("DOMContentLoaded", init);
 /* ==========================================================
    印刷: 全体の大きさスライダー
    CSS変数 --print-page-scale を上下させて紙面の縮尺を変える。
-   値は localStorage("seat-table2-print-scale") に単独で保存する
+   値は localStorage("seat-table-print-scale") に単独で保存する
    （本体の state を上書きしないため）。
    ========================================================== */
 (function(){
-  var KEY = "seat-table2-print-scale";
+  var KEY = "seat-table-print-scale";
   var MIN = 60, MAX = 180;
   function read(){
-    var v = parseFloat(localStorage.getItem(KEY));
+    var v = parseFloat(STORAGE.getItem(KEY));
     if (!isFinite(v) || v < MIN/100 || v > MAX/100) return 1;
     return v;
   }
@@ -1618,7 +1871,7 @@ document.addEventListener("DOMContentLoaded", init);
     lab.textContent = text(v);
     input.addEventListener("input", function(){
       var nv = parseInt(input.value, 10) / 100;
-      try { localStorage.setItem(KEY, String(nv)); } catch(e){}
+      try { STORAGE.setItem(KEY, String(nv)); } catch(e){}
       apply(nv);
       lab.textContent = text(nv);
     });
@@ -1640,13 +1893,13 @@ document.addEventListener("DOMContentLoaded", init);
    印刷: 行の高さ（縦の伸ばし）と、プレビューの画面フィット表示
    ========================================================== */
 (function(){
-  var ROWKEY = "seat-table2-print-row-h";
-  var FITKEY = "seat-table2-preview-fit";
+  var ROWKEY = "seat-table-print-row-h";
+  var FITKEY = "seat-table-preview-fit";
   var MAXMM = 30;
   function q(s){ return document.querySelector(s); }
 
   function readRow(){
-    var v = parseFloat(localStorage.getItem(ROWKEY));
+    var v = parseFloat(STORAGE.getItem(ROWKEY));
     if (!isFinite(v) || v < 0 || v > MAXMM) return 0;
     return v;
   }
@@ -1657,8 +1910,8 @@ document.addEventListener("DOMContentLoaded", init);
 
   function readFit(){
     /* 編集モードでは画面フィットの縮小をかけない */
-    if (localStorage.getItem("seat-table2-print-look") === "0") return false;
-    return localStorage.getItem(FITKEY) !== "0";
+    if (STORAGE.getItem("seat-table-print-look") === "0") return false;
+    return STORAGE.getItem(FITKEY) !== "0";
   }
   function applyFit(){
     if (window.__suspendPreviewFit) return;
@@ -1715,7 +1968,7 @@ document.addEventListener("DOMContentLoaded", init);
     lab.textContent = rowText(v);
     input.addEventListener("input", function(){
       var nv = parseInt(input.value, 10);
-      try { localStorage.setItem(ROWKEY, String(nv)); } catch(e){}
+      try { STORAGE.setItem(ROWKEY, String(nv)); } catch(e){}
       applyRow(nv);
       lab.textContent = rowText(nv);
       scheduleFit();
@@ -1736,7 +1989,7 @@ document.addEventListener("DOMContentLoaded", init);
     cb.style.width = "18px";
     cb.style.height = "18px";
     cb.addEventListener("change", function(){
-      try { localStorage.setItem(FITKEY, cb.checked ? "1" : "0"); } catch(e){}
+      try { STORAGE.setItem(FITKEY, cb.checked ? "1" : "0"); } catch(e){}
       applyFit();
     });
     fitRow.appendChild(fitLab);
@@ -1859,10 +2112,10 @@ document.addEventListener("DOMContentLoaded", init);
    コマのstart/endでブロックを特定し、集団のstart/endを対応付ける。
    ========================================================== */
 (function(){
-  var KEY = "seat-table2-group-times";
+  var KEY = "seat-table-group-times";
   function digits(s){ return String(s || "").replace(/[^0-9]/g, ""); }
-  function load(){ try { return JSON.parse(localStorage.getItem(KEY)) || {}; } catch(e){ return {}; } }
-  function save(o){ try { localStorage.setItem(KEY, JSON.stringify(o)); } catch(e){} }
+  function load(){ try { return JSON.parse(STORAGE.getItem(KEY)) || {}; } catch(e){ return {}; } }
+  function save(o){ try { STORAGE.setItem(KEY, JSON.stringify(o)); } catch(e){} }
   function absorb(text){
     var p = null;
     try { p = JSON.parse(text); } catch(e){ return false; }
@@ -2003,8 +2256,8 @@ document.addEventListener("DOMContentLoaded", init);
    押し下げられるため。初期状態は閉じる。
    ========================================================== */
 (function(){
-  var KEY = "seat-table2-print-panel-open";
-  function isOpen(){ return localStorage.getItem(KEY) === "1"; }
+  var KEY = "seat-table-print-panel-open";
+  function isOpen(){ return STORAGE.getItem(KEY) === "1"; }
   function apply(panel, open){
     var kids = panel.children, i;
     for (i = 0; i < kids.length; i++){
@@ -2028,7 +2281,7 @@ document.addEventListener("DOMContentLoaded", init);
     }
     btn.addEventListener("click", function(){
       var next = !isOpen();
-      try { localStorage.setItem(KEY, next ? "1" : "0"); } catch(e){}
+      try { STORAGE.setItem(KEY, next ? "1" : "0"); } catch(e){}
       apply(panel, next);
       label();
     });
@@ -2048,8 +2301,8 @@ document.addEventListener("DOMContentLoaded", init);
    OFF : 画面用の大きさ（編集向け）
    ========================================================== */
 (function(){
-  var KEY = "seat-table2-print-look";
-  function isOn(){ return localStorage.getItem(KEY) !== "0"; }
+  var KEY = "seat-table-print-look";
+  function isOn(){ return STORAGE.getItem(KEY) !== "0"; }
   function apply(){
     var st = document.getElementById("preview-mirror-print");
     if (st) st.disabled = !isOn();
@@ -2073,7 +2326,7 @@ document.addEventListener("DOMContentLoaded", init);
     cb.id = "printLookToggle";
     cb.checked = isOn();
     cb.addEventListener("change", function(){
-      try { localStorage.setItem(KEY, cb.checked ? "1" : "0"); } catch(e){}
+      try { STORAGE.setItem(KEY, cb.checked ? "1" : "0"); } catch(e){}
       apply();
     });
     lab.appendChild(cb);
@@ -2137,7 +2390,7 @@ document.addEventListener("DOMContentLoaded", init);
    ========================================================== */
 (function(){
   var ID = "birthdate-bulk";
-  var KEY = "seat-table2-v1";
+  var KEY = "seat-table-v1";
   function norm(s){ return String(s || "").replace(/[\s\u3000,\uFF0C\u3001;\uFF1B\t]+/g, ""); }
   function pad(n){ return (n < 10 ? "0" : "") + n; }
   function toISO(y, m, d){
@@ -2158,7 +2411,7 @@ document.addEventListener("DOMContentLoaded", init);
   }
   function build(text){
     var s = null;
-    try { s = JSON.parse(localStorage.getItem(KEY)); } catch(e){ return null; }
+    try { s = JSON.parse(STORAGE.getItem(KEY)); } catch(e){ return null; }
     if (!s || !s.students) return null;
     var idx = {}, i;
     for (i = 0; i < s.students.length; i++) idx[norm(s.students[i].name)] = i;
@@ -2215,7 +2468,7 @@ document.addEventListener("DOMContentLoaded", init);
       if (!r || !r.plan.length) return;
       var i;
       for (i = 0; i < r.plan.length; i++) r.state.students[r.plan[i].i].birthdate = r.plan[i].iso;
-      try { localStorage.setItem(KEY, JSON.stringify(r.state)); } catch(e){ msg.textContent = "保存に失敗しました。"; return; }
+      try { STORAGE.setItem(KEY, JSON.stringify(r.state)); } catch(e){ msg.textContent = "保存に失敗しました。"; return; }
       location.reload();
     });
     row.appendChild(checkBtn); row.appendChild(applyBtn);
@@ -2235,8 +2488,8 @@ document.addEventListener("DOMContentLoaded", init);
    例) 2026年度の中3(g=9) = 2011/4/2〜2012/4/1
    ========================================================== */
 (function(){
-  var KEY = "seat-table2-v1";
-  function state(){ try { return JSON.parse(localStorage.getItem(KEY)); } catch(e){ return null; } }
+  var KEY = "seat-table-v1";
+  function state(){ try { return JSON.parse(STORAGE.getItem(KEY)); } catch(e){ return null; } }
   function schoolYear(d){ return (d.getMonth() + 1 >= 4) ? d.getFullYear() : d.getFullYear() - 1; }
   function gradeOf(iso, today){
     var m = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(String(iso || ""));
@@ -2278,7 +2531,7 @@ document.addEventListener("DOMContentLoaded", init);
     }
     var msg = "学年を更新: " + upd + "件\n変更なし: " + same + "件\n生年月日なし: " + noBd + "件\n小1〜高3の範囲外: " + outOfRange + "件\n\n保存してページを再読み込みします。";
     if (!window.confirm(msg)) return;
-    try { localStorage.setItem(KEY, JSON.stringify(s)); } catch(e){ return; }
+    try { STORAGE.setItem(KEY, JSON.stringify(s)); } catch(e){ return; }
     location.reload();
   }
   function gradeRank(g){
@@ -2315,7 +2568,7 @@ document.addEventListener("DOMContentLoaded", init);
       var r = cmpKey(a, b, key);
       return (dir === "desc") ? -r : r;
     });
-    try { localStorage.setItem(KEY, JSON.stringify(s)); } catch(e){ return; }
+    try { STORAGE.setItem(KEY, JSON.stringify(s)); } catch(e){ return; }
     location.reload();
   }
   function sortByBirthdate(){
@@ -2332,7 +2585,7 @@ document.addEventListener("DOMContentLoaded", init);
       if (!y) return -1;
       return x < y ? -1 : (x > y ? 1 : 0);
     });
-    try { localStorage.setItem(KEY, JSON.stringify(s)); } catch(e){ return; }
+    try { STORAGE.setItem(KEY, JSON.stringify(s)); } catch(e){ return; }
     location.reload();
   }
   function inject(){
@@ -2373,20 +2626,20 @@ document.addEventListener("DOMContentLoaded", init);
    sessionStorage なので次回の起動時は通常どおり。
    ========================================================== */
 (function(){
-  var KEY = "seat-table2-active-tab";
+  var KEY = "seat-table-active-tab";
   function save(){
     /* タブ名は件数バッジを含み変動するため、位置で覚える */
     var btns = document.querySelectorAll(".tab-btn"), i;
     for (i = 0; i < btns.length; i++){
       if (/(^|\s)active(\s|$)/.test(btns[i].className)){
-        try { sessionStorage.setItem(KEY, String(i)); } catch(e){}
+        try { SESSION_STORAGE.setItem(KEY, String(i)); } catch(e){}
         return;
       }
     }
   }
   function restore(){
     var want = null;
-    try { want = sessionStorage.getItem(KEY); } catch(e){ return; }
+    try { want = SESSION_STORAGE.getItem(KEY); } catch(e){ return; }
     var i = parseInt(want, 10);
     if (!isFinite(i) || i < 0) return;
     var btns = document.querySelectorAll(".tab-btn");
@@ -2410,9 +2663,9 @@ document.addEventListener("DOMContentLoaded", init);
    @page は属性で切り替えられないので style を差し替える。
    ========================================================== */
 (function(){
-  var KEY = "seat-table2-paper";
+  var KEY = "seat-table-paper";
   var SID = "paper-orientation-style";
-  function get(){ return localStorage.getItem(KEY) === "portrait" ? "portrait" : "landscape"; }
+  function get(){ return STORAGE.getItem(KEY) === "portrait" ? "portrait" : "landscape"; }
   function apply(){
     var v = get();
     document.documentElement.setAttribute("data-paper", v);
@@ -2442,7 +2695,7 @@ document.addEventListener("DOMContentLoaded", init);
     });
     sel.value = get();
     sel.addEventListener("change", function(){
-      try { localStorage.setItem(KEY, sel.value); } catch(e){}
+      try { STORAGE.setItem(KEY, sel.value); } catch(e){}
       apply();
     });
     lab.appendChild(sel);
@@ -2461,9 +2714,9 @@ document.addEventListener("DOMContentLoaded", init);
    倍率(transform)は文字がぼやけるため最後の手段にする。
    ========================================================== */
 (function(){
-  var SCALE_KEY = "seat-table2-print-scale";
-  var ROW_KEY = "seat-table2-print-row-h";
-  var UNDO_KEY = "seat-table2-fit-undo";
+  var SCALE_KEY = "seat-table-print-scale";
+  var ROW_KEY = "seat-table-print-row-h";
+  var UNDO_KEY = "seat-table-fit-undo";
   var MIN = 0.5;
   var busy = false;
   function root(){ return document.documentElement; }
@@ -2479,26 +2732,26 @@ document.addEventListener("DOMContentLoaded", init);
     return c.getBoundingClientRect().height / ph;
   }
   function curRow(){
-    var v = parseFloat(localStorage.getItem(ROW_KEY));
+    var v = parseFloat(STORAGE.getItem(ROW_KEY));
     return isFinite(v) && v >= 0 ? v : 0;
   }
   function readState(){
-    var s = JSON.parse(localStorage.getItem("seat-table2-v1") || "null");
+    var s = JSON.parse(STORAGE.getItem("seat-table-v1") || "null");
     var subj = s && s.printSettings ? s.printSettings.subjectSize : 15;
     var stu = s && s.printSettings ? s.printSettings.studentSize : 10.5;
-    var scale = parseFloat(localStorage.getItem(SCALE_KEY));
+    var scale = parseFloat(STORAGE.getItem(SCALE_KEY));
     if (!isFinite(scale)) scale = 1;
     return { row: curRow(), subj: subj, stu: stu, scale: scale };
   }
   function writeState(st){
     try {
-      localStorage.setItem(ROW_KEY, String(st.row));
-      localStorage.setItem(SCALE_KEY, String(st.scale));
-      var s = JSON.parse(localStorage.getItem("seat-table2-v1"));
+      STORAGE.setItem(ROW_KEY, String(st.row));
+      STORAGE.setItem(SCALE_KEY, String(st.scale));
+      var s = JSON.parse(STORAGE.getItem("seat-table-v1"));
       if (s && s.printSettings){
         s.printSettings.subjectSize = st.subj;
         s.printSettings.studentSize = st.stu;
-        localStorage.setItem("seat-table2-v1", JSON.stringify(s));
+        STORAGE.setItem("seat-table-v1", JSON.stringify(s));
       }
     } catch(e){}
   }
@@ -2551,7 +2804,7 @@ document.addEventListener("DOMContentLoaded", init);
       return;
     }
     /* 保存する前の状態を「元に戻す」用に控えておく */
-    try { localStorage.setItem(UNDO_KEY, JSON.stringify(before)); } catch(e){}
+    try { STORAGE.setItem(UNDO_KEY, JSON.stringify(before)); } catch(e){}
     var sc = document.getElementById("printPageScale");
     if (sc){ sc.value = String(pct); sc.dispatchEvent(new Event("input", { bubbles: true })); }
     var rw = document.getElementById("printRowH");
@@ -2564,10 +2817,10 @@ document.addEventListener("DOMContentLoaded", init);
   function updateUndoButton(){
     var b = undoBtn();
     if (!b) return;
-    b.style.display = localStorage.getItem(UNDO_KEY) ? "" : "none";
+    b.style.display = STORAGE.getItem(UNDO_KEY) ? "" : "none";
   }
   function doUndo(){
-    var raw = localStorage.getItem(UNDO_KEY);
+    var raw = STORAGE.getItem(UNDO_KEY);
     if (!raw) return;
     var st = null;
     try { st = JSON.parse(raw); } catch(e){}
@@ -2578,7 +2831,7 @@ document.addEventListener("DOMContentLoaded", init);
     if (sc){ sc.value = String(Math.round(st.scale * 100)); sc.dispatchEvent(new Event("input", { bubbles: true })); }
     var rw = document.getElementById("printRowH");
     if (rw){ rw.value = String(st.row); rw.dispatchEvent(new Event("input", { bubbles: true })); }
-    try { localStorage.removeItem(UNDO_KEY); } catch(e){}
+    try { STORAGE.removeItem(UNDO_KEY); } catch(e){}
     updateUndoButton();
     window.dispatchEvent(new Event("resize"));
   }
@@ -2613,10 +2866,10 @@ document.addEventListener("DOMContentLoaded", init);
    substitute（振替）にする。項目名を事前に知る必要がない。
    ========================================================== */
 (function(){
-  var KEY = "seat-table2-substitutes";
+  var KEY = "seat-table-substitutes";
   function norm(s){ return String(s || "").replace(/[\s\u3000]+/g, ""); }
   function digits(s){ return String(s || "").replace(/[^0-9]/g, ""); }
-  function load(){ try { return JSON.parse(localStorage.getItem(KEY)) || {}; } catch(e){ return {}; } }
+  function load(){ try { return JSON.parse(STORAGE.getItem(KEY)) || {}; } catch(e){ return {}; } }
   function absorb(text){
     var p = null;
     try { p = JSON.parse(text); } catch(e){ return false; }
@@ -2643,7 +2896,7 @@ document.addEventListener("DOMContentLoaded", init);
     }
     var all = load();
     all[p.date] = map;
-    try { localStorage.setItem(KEY, JSON.stringify(all)); } catch(e){}
+    try { STORAGE.setItem(KEY, JSON.stringify(all)); } catch(e){}
     return n > 0;
   }
   function watch(){
@@ -2705,29 +2958,20 @@ document.addEventListener("DOMContentLoaded", init);
    取込payloadから山括弧の生徒を拾い、同じ席の相手側を斜線にする。
    ========================================================== */
 (function(){
-  var KEY = "seat-table2-solo";
+  var KEY = "seat-table-solo";
   function norm(s){ return String(s || "").replace(/[\s\u3000]+/g, ""); }
-  function load(){ try { return JSON.parse(localStorage.getItem(KEY)) || {}; } catch(e){ return {}; } }
+  function load(){ try { return JSON.parse(STORAGE.getItem(KEY)) || {}; } catch(e){ return {}; } }
   function isSolo(subj){ return /[<\uFF1C][^>\uFF1E]*[>\uFF1E]/.test(String(subj || "")); }
   function stripBrackets(subj){ return String(subj || "").replace(/[<\uFF1C][^>\uFF1E]*[>\uFF1E]/g, "").trim(); }
   function comboKey(name, subj){ return norm(name) + "\u2016" + norm(stripBrackets(subj)); }
   function absorb(text){
     var p = null;
     try { p = JSON.parse(text); } catch(e){ return false; }
-    if (!p || !p.date || !p.items) return false;
-    var map = {}, n = 0, i;
-    for (i = 0; i < p.items.length; i++){
-      var it = p.items[i];
-      if (!it) continue;
-      var subj = it.subject || (it.raw && it.raw.subject_name) || "";
-      if (!isSolo(subj)) continue;
-      map[comboKey(it.student_name, subj)] = 1;
-      n++;
-    }
-    var all = load();
-    all[p.date] = map;
-    try { localStorage.setItem(KEY, JSON.stringify(all)); } catch(e){}
-    return n > 0;
+    if(!p || !p.date) return false;
+    if(typeof soloMapFromEwebPayload !== "function" || typeof saveEwebSoloMap !== "function") return false;
+    var map = soloMapFromEwebPayload(p);
+    saveEwebSoloMap(p.date, map);
+    return Object.keys(map).length > 0;
   }
   function watch(){
     var tas = document.querySelectorAll("textarea"), i;
@@ -2743,6 +2987,11 @@ document.addEventListener("DOMContentLoaded", init);
     }
   }
   function dateOf(el){
+    var tagged = el.closest ? el.closest("[data-solo-date]") : null;
+    if (tagged){
+      var taggedDate = tagged.getAttribute("data-solo-date");
+      if (taggedDate) return taggedDate;
+    }
     var v = el.closest ? el.closest(".view") : null;
     var inp = v ? v.querySelector("input[type=\"date\"]") : null;
     if (!inp) inp = document.querySelector("#view-seat input[type=\"date\"]");
@@ -2758,14 +3007,29 @@ document.addEventListener("DOMContentLoaded", init);
     var inp = cell.querySelector(".js-subject");
     return inp ? inp.value : "";
   }
-  /* 斜線はCSS(.cell.solo-blocked の repeating-linear-gradient)だけで描く。
-     判定は「生徒名＋科目」の組み合わせで行う。同じ生徒でも科目によって
-     1対1だったり1対2だったりするため、生徒名だけでは区別できないため。 */
+  function slashSvg(){
+    return (typeof soloSlashMarkHtml === "function") ? soloSlashMarkHtml() : "";
+  }
+  function setBlocked(cells, on){
+    cells.forEach(function(c){
+      if (!c) return;
+      c.classList.toggle("solo-blocked", on);
+      var mark = c.querySelector(".solo-slash-mark");
+      if (on){
+        if (!mark) c.insertAdjacentHTML("beforeend", slashSvg());
+      } else if (mark && mark.parentNode){
+        mark.parentNode.removeChild(mark);
+      }
+    });
+  }
+  /* 斜線は各セル内のSVG実要素。判定は「生徒名＋科目」の組み合わせ。
+     同じ生徒でも科目によって1対1だったり1対2だったりするため。 */
   function paint(){
     var views = document.querySelectorAll(".view, .print-preview-page"), vi, rows = [];
     for (vi = 0; vi < views.length; vi++){
-      if (getComputedStyle(views[vi]).display === "none") continue;
-      var found = views[vi].querySelectorAll(".seat-row-wrap");
+      var view = views[vi];
+      if (view.classList.contains("view") && view.hidden) continue;
+      var found = view.querySelectorAll(".seat-row-wrap");
       for (var fi = 0; fi < found.length; fi++) rows.push(found[fi]);
     }
     var i;
@@ -2781,8 +3045,8 @@ document.addEventListener("DOMContentLoaded", init);
       var rightSolo = !!(rightName && map[rightKey]);
       var onRight = leftSolo && !rightName;
       var onLeft = rightSolo && !leftName;
-      [kids[5], kids[6], kids[7]].forEach(function(c){ c.classList.toggle("solo-blocked", onRight); });
-      [kids[2], kids[3], kids[4]].forEach(function(c){ c.classList.toggle("solo-blocked", onLeft); });
+      setBlocked([kids[5], kids[6], kids[7]], onRight);
+      setBlocked([kids[2], kids[3], kids[4]], onLeft);
     }
   }
   try { watch(); paint(); } catch(e){}
@@ -2824,7 +3088,7 @@ document.addEventListener("DOMContentLoaded", init);
     var date = currentDate();
     if (!date) return;
     var raw = null;
-    try { raw = JSON.parse(localStorage.getItem("seat-table2-v1")); } catch(e){ return; }
+    try { raw = JSON.parse(STORAGE.getItem("seat-table-v1")); } catch(e){ return; }
     if (!raw || !raw.days || !raw.days[date]) return;
     var day = raw.days[date];
     var blocks = day.blocks || day;
@@ -2833,8 +3097,8 @@ document.addEventListener("DOMContentLoaded", init);
     var msg = "この枠の座席を、手入力した席番号の順に並べ替えます。\n" + block.seats.length + "件を対象にします。\nよろしいですか？";
     if (!window.confirm(msg)) return;
     block.seats.sort(function(a, b){ return cmp(a.seatNumber, b.seatNumber); });
-    try { localStorage.setItem("seat-table2-v1", JSON.stringify(raw)); } catch(e){ return; }
-    try { sessionStorage.setItem("seat-table2-restore-date", date); } catch(e){}
+    try { STORAGE.setItem("seat-table-v1", JSON.stringify(raw)); } catch(e){ return; }
+    try { SESSION_STORAGE.setItem("seat-table-restore-date", date); } catch(e){}
     location.reload();
   }
   function inject(){
@@ -2871,10 +3135,10 @@ document.addEventListener("DOMContentLoaded", init);
    その日付へ自動で戻す。何もなければ何もしない。
    ========================================================== */
 (function(){
-  var KEY = "seat-table2-restore-date";
+  var KEY = "seat-table-restore-date";
   function restore(){
     var date = null;
-    try { date = sessionStorage.getItem(KEY); } catch(e){ return; }
+    try { date = SESSION_STORAGE.getItem(KEY); } catch(e){ return; }
     if (!date) return;
     var inp = document.querySelector("#view-seat input[type=\"date\"]");
     if (!inp) return;
@@ -2882,7 +3146,7 @@ document.addEventListener("DOMContentLoaded", init);
     inp.value = date;
     inp.dispatchEvent(new Event("change", { bubbles: true }));
   }
-  function cleanup(){ try { sessionStorage.removeItem(KEY); } catch(e){} }
+  function cleanup(){ try { SESSION_STORAGE.removeItem(KEY); } catch(e){} }
   function boot(){
     try { restore(); } catch(e){}
     /* 他の初期化処理が後から「今日」の日付で上書きしてくることがあるため、
@@ -2983,7 +3247,7 @@ document.addEventListener("DOMContentLoaded", init);
     var date = currentDate();
     if (!date) return;
     var raw = null;
-    try { raw = JSON.parse(localStorage.getItem("seat-table2-v1")); } catch(e){ return; }
+    try { raw = JSON.parse(STORAGE.getItem("seat-table-v1")); } catch(e){ return; }
     if (!raw || !raw.days || !raw.days[date]){ window.alert("この日にはデータがありません。"); return; }
     var day = raw.days[date];
     var blocks = day.blocks || day;
@@ -3033,11 +3297,11 @@ document.addEventListener("DOMContentLoaded", init);
   }
   function applyImportDay(date, blocks){
     var raw = null;
-    try { raw = JSON.parse(localStorage.getItem("seat-table2-v1")) || { days: {} }; } catch(e){ raw = { days: {} }; }
+    try { raw = JSON.parse(STORAGE.getItem("seat-table-v1")) || { days: {} }; } catch(e){ raw = { days: {} }; }
     if (!raw.days) raw.days = {};
     ensureRoster(raw, blocks);
     raw.days[date] = { blocks: blocks };
-    try { localStorage.setItem("seat-table2-v1", JSON.stringify(raw)); } catch(e){ return false; }
+    try { STORAGE.setItem("seat-table-v1", JSON.stringify(raw)); } catch(e){ return false; }
     return true;
   }
   function checkImportOnLoad(){
@@ -3087,14 +3351,14 @@ document.addEventListener("DOMContentLoaded", init);
    ここではツールバーへのチェックボックス追加だけを行う。
    ========================================================== */
 (function(){
-  var SYNC_KEY = "seat-table2-sync-enabled";
+  var SYNC_KEY = "seat-table-sync-enabled";
   function syncEnabled(){
     var v = null;
-    try { v = localStorage.getItem(SYNC_KEY); } catch(e){}
+    try { v = STORAGE.getItem(SYNC_KEY); } catch(e){}
     return v === null ? true : v === "1";
   }
   function setSyncEnabled(on){
-    try { localStorage.setItem(SYNC_KEY, on ? "1" : "0"); } catch(e){}
+    try { STORAGE.setItem(SYNC_KEY, on ? "1" : "0"); } catch(e){}
   }
   function injectToggle(){
     var bars = document.querySelectorAll("#view-seat .js-seat-actions"), i;
@@ -3110,7 +3374,9 @@ document.addEventListener("DOMContentLoaded", init);
       cb.name = "seatNumberSync";
       cb.className = "js-sync-toggle";
       cb.checked = syncEnabled();
-      cb.addEventListener("change", function(ev){ setSyncEnabled(ev.target.checked); });
+      cb.addEventListener("change", function(ev){
+        setSyncEnabled(ev.target.checked);
+      });
       var span = document.createElement("span");
       span.textContent = "番号の自動反映・並べ替え";
       wrap.appendChild(cb);
@@ -3142,7 +3408,7 @@ document.addEventListener("DOMContentLoaded", init);
   /* 校舎ごとに合言葉のキーを分ける。他校の座席表アプリと同じ
      Supabaseの表を使い回しているため、そのままだと偶然同じ
      合言葉を使うと別の校舎のデータとぶつかる可能性がある。 */
-  var CODE_PREFIX = "kyowa:";
+  var CODE_PREFIX = window.__seatCodePrefix || "hiiragiyama:";
   function sideOut(x){ return x ? [x.subject || "", x.grade || "", x.student || "", x.status || ""] : ["", "", "", ""]; }
   function sideIn(a){ return { subject: a[0] || "", grade: a[1] || "", student: a[2] || "", status: a[3] || "" }; }
   function compactSeats(seats){
@@ -3201,11 +3467,11 @@ document.addEventListener("DOMContentLoaded", init);
   }
   function applyImportDay(date, blocks){
     var raw = null;
-    try { raw = JSON.parse(localStorage.getItem("seat-table2-v1")) || { days: {} }; } catch(e){ raw = { days: {} }; }
+    try { raw = JSON.parse(STORAGE.getItem("seat-table-v1")) || { days: {} }; } catch(e){ raw = { days: {} }; }
     if (!raw.days) raw.days = {};
     ensureRoster(raw, blocks);
     raw.days[date] = { blocks: blocks };
-    try { localStorage.setItem("seat-table2-v1", JSON.stringify(raw)); } catch(e){ return false; }
+    try { STORAGE.setItem("seat-table-v1", JSON.stringify(raw)); } catch(e){ return false; }
     return true;
   }
   async function doSend(){
@@ -3216,7 +3482,7 @@ document.addEventListener("DOMContentLoaded", init);
     var date = currentDate();
     if (!date) return;
     var raw = null;
-    try { raw = JSON.parse(localStorage.getItem("seat-table2-v1")); } catch(e){ return; }
+    try { raw = JSON.parse(STORAGE.getItem("seat-table-v1")); } catch(e){ return; }
     if (!raw || !raw.days || !raw.days[date]){ window.alert("この日にはデータがありません。"); return; }
     var blocks = raw.days[date].blocks || raw.days[date];
     if (!blocks || !blocks.length){ window.alert("この日にはデータがありません。"); return; }
@@ -3304,7 +3570,7 @@ document.addEventListener("DOMContentLoaded", init);
     var date = currentDate();
     if (!date) return;
     var raw = null;
-    try { raw = JSON.parse(localStorage.getItem("seat-table2-v1")); } catch(e){ return; }
+    try { raw = JSON.parse(STORAGE.getItem("seat-table-v1")); } catch(e){ return; }
     if (!raw || !raw.days || !raw.days[date]){ window.alert("この日にはデータがありません。"); return; }
     var day = raw.days[date];
     var blocks = day.blocks || day;
@@ -3319,8 +3585,8 @@ document.addEventListener("DOMContentLoaded", init);
         blocks[i].seats.sort(function(a, b){ return cmp(a.seatNumber, b.seatNumber); });
       }
     }
-    try { localStorage.setItem("seat-table2-v1", JSON.stringify(raw)); } catch(e){ return; }
-    try { sessionStorage.setItem("seat-table2-restore-date", date); } catch(e){}
+    try { STORAGE.setItem("seat-table-v1", JSON.stringify(raw)); } catch(e){ return; }
+    try { SESSION_STORAGE.setItem("seat-table-restore-date", date); } catch(e){}
     location.reload();
   }
   function inject(){
@@ -3350,16 +3616,16 @@ document.addEventListener("DOMContentLoaded", init);
 
 /* ==========================================================
    講習・振替・欠席の隣に「1対1」ボタンを追加する。
-   押すと、その生徒を「1対1」として seat-table2-solo に登録/解除する。
+   押すと、その生徒を「1対1」として seat-table-solo に登録/解除する。
    実際の斜線描画（隣の空席への反映）は、既存の1対1機能の
    setIntervalが自動で拾って再描画してくれるので、ここでは
    マップの更新とボタン自身の見た目更新だけを行う。
    ========================================================== */
 (function(){
-  var KEY = "seat-table2-solo";
+  var KEY = "seat-table-solo";
   function norm(s){ return String(s || "").replace(/[\s\u3000]+/g, ""); }
-  function load(){ try { return JSON.parse(localStorage.getItem(KEY)) || {}; } catch(e){ return {}; } }
-  function save(all){ try { localStorage.setItem(KEY, JSON.stringify(all)); } catch(e){} }
+  function load(){ try { return JSON.parse(STORAGE.getItem(KEY)) || {}; } catch(e){ return {}; } }
+  function save(all){ try { STORAGE.setItem(KEY, JSON.stringify(all)); } catch(e){} }
   function currentDate(){
     var inp = document.querySelector("#view-seat input[type=\"date\"]");
     return inp ? inp.value : "";
@@ -3483,7 +3749,7 @@ document.addEventListener("DOMContentLoaded", init);
     var date = currentDate();
     if (!date) return null;
     var raw = null;
-    try { raw = JSON.parse(localStorage.getItem("seat-table2-v1")); } catch(e){ return null; }
+    try { raw = JSON.parse(STORAGE.getItem("seat-table-v1")); } catch(e){ return null; }
     if (!raw || !raw.days || !raw.days[date]) return null;
     var blocks = raw.days[date].blocks || raw.days[date];
     var block = blocks[loc.bIdx];
@@ -3504,7 +3770,7 @@ document.addEventListener("DOMContentLoaded", init);
     var found = getTrialSeatSide(loc);
     if (!found){ window.alert("先に生徒を選択してください。"); return; }
     found.seat[found.side].trial = !found.seat[found.side].trial;
-    try { localStorage.setItem("seat-table2-v1", JSON.stringify(found.raw)); } catch(e){}
+    try { STORAGE.setItem("seat-table-v1", JSON.stringify(found.raw)); } catch(e){}
   }
   function updateTrialUI(btn, cell){
     var active = trialIsActive(cell);

@@ -92,8 +92,72 @@ padding:8px 12px; font-size:0.88em; color: var(--ink); white-space:nowrap;
 .btn.danger{ color: var(--red); border-color: #f0c4bd; }
 .btn.danger:hover{ background: #fdecea; }
 .btn.ghost{ border-color: transparent; background:none; }
+.print-preview-page #btnImportEweb,
+.print-preview-page a.btn[href^="javascript:"]{
+background: transparent !important;
+color: inherit !important;
+border-color: var(--line) !important;
+}
 .btn:disabled{ opacity:0.45; cursor:not-allowed; }
 .btn-row{ display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+
+/* eWeb取込専用アクセント。primary（青）・danger（赤）とは別系統のティール
+   共有操作の汎用ボタン指定より詳細度を上げて、塗りつぶしが効くようにする */
+#btnImportEweb,
+#view-seat .js-share-actions #btnImportEweb{
+background: #0f5c56;
+color: #fff;
+border-color: #0f5c56;
+}
+#btnImportEweb:hover,
+#view-seat .js-share-actions #btnImportEweb:hover{
+background: #134e4a;
+border-color: #134e4a;
+color: #fff;
+}
+#btnImportEweb:focus,
+#btnImportEweb:focus-visible,
+#view-seat .js-share-actions #btnImportEweb:focus,
+#view-seat .js-share-actions #btnImportEweb:focus-visible{
+outline: 2px solid #0f766e;
+outline-offset: 2px;
+color: #fff;
+}
+#btnImportEweb:disabled,
+#view-seat .js-share-actions #btnImportEweb:disabled{
+background: #9cb8b5;
+border-color: #9cb8b5;
+color: #f4fffd;
+}
+#view-settings a.btn.primary[href^="javascript:"]{
+background: #0f5c56;
+color: #fff;
+border-color: #0f5c56;
+}
+#view-settings a.btn.primary[href^="javascript:"]:hover{
+background: #134e4a;
+border-color: #134e4a;
+color: #fff;
+}
+#view-settings a.btn.primary[href^="javascript:"]:focus,
+#view-settings a.btn.primary[href^="javascript:"]:focus-visible{
+outline: 2px solid #0f766e;
+outline-offset: 2px;
+color: #fff;
+}
+
+.multi-print-range{
+display:flex; flex-wrap:wrap; gap:12px; margin: 12px 0;
+}
+.multi-print-range label{ display:flex; align-items:center; gap:6px; font-size:0.9em; }
+.multi-print-range input[type=date]{ padding:6px 8px; border:1px solid var(--line); border-radius:6px; }
+.multi-print-summary{ font-size:0.9em; font-weight:600; color: var(--blue-dark); margin: 0 0 10px; }
+.multi-date-list{
+max-height: 36vh; overflow:auto; border:1px solid var(--line); border-radius:8px; padding:8px;
+}
+.multi-date-list .opt{ margin:0 0 6px; }
+.multi-date-list .opt:last-child{ margin-bottom:0; }
+#multiDayPrint{ display: none !important; }
 
 /* ---------- Seat table toolbar ---------- */
 .seat-toolbar{
@@ -124,6 +188,8 @@ text-align:center; min-width:56px;
 .legend .swatch.course{ background:#3f6fd6; }
 .legend .swatch.transfer{ background:#2e8b57; }
 .legend .swatch.absent{ background:#c0392b; }
+.legend .swatch.solo{ background:#8e44ad; }
+.legend .swatch.trial{ background:#f1c40f; }
 
 /* ---------- Lesson blocks ---------- */
 .blocks{ display:flex; flex-direction:column; gap:20px; }
@@ -305,23 +371,26 @@ main{ padding: 10px; }
 .weekday-chip{ min-width:44px; padding:5px 6px; }
 }
 
+.block-teachers{ display:none; }
+
 /* ---------- Seat view layout (screen only; print / preview rules stay untouched) ---------- */
 @media screen{
+body:has(#view-seat:not([hidden])) main{ max-width: 1680px; }
 #view-seat{
---control-h: 36px;
+--control-h: 38px;
 background: #fff;
 }
 #view-seat .page-head{
 background: #fff;
 border-color: var(--line);
-padding: 14px 16px 12px;
+padding: 16px 18px 14px;
 }
 #view-seat .seat-date-bar{
-display:flex; flex-wrap:wrap; align-items:center; gap:10px 16px;
-margin-bottom: 12px;
+display:flex; flex-wrap:wrap; align-items:center; gap:10px 18px;
+margin-bottom: 14px;
 }
 #view-seat .seat-date-bar h2{
-margin:0; font-size:1.25em; font-weight:700; line-height:1.3;
+margin:0; font-size:1.35em; font-weight:700; line-height:1.3;
 }
 #view-seat .seat-date-bar .date-field{
 display:flex; align-items:center; gap:8px;
@@ -337,28 +406,37 @@ font-size:0.95em;
 color: var(--ink);
 }
 #view-seat .seat-toolbar{
-display:flex; flex-direction:column; gap:0;
-align-items:stretch; margin-bottom:0;
+display:grid;
+grid-template-columns: repeat(3, minmax(0, 1fr));
+gap: 12px;
+align-items:stretch;
+margin-bottom:0;
 }
 #view-seat .toolbar-group{
-display:flex; flex-wrap:wrap; align-items:center; gap:8px 12px;
-padding: 10px 0;
-border-top: 1px solid var(--line-soft);
+display:flex; flex-direction:column; align-items:flex-start; gap:8px;
+padding: 12px 14px;
+background: #fafbfd;
+border: 1px solid var(--line-soft);
+border-radius: 8px;
 }
-#view-seat .toolbar-group:first-child{ border-top:none; padding-top:0; }
 #view-seat .toolbar-label{
 font-size:0.75em; font-weight:700; color: var(--ink-soft);
-letter-spacing:0.04em; min-width:4.8em; flex-shrink:0;
+letter-spacing:0.06em;
 }
+#view-seat .toolbar-group .btn-row{ width: 100%; }
 #view-seat .btn{
 height: var(--control-h);
 padding: 0 12px;
 display:inline-flex; align-items:center; justify-content:center;
 font-size:0.9em;
 }
+#view-seat .js-share-actions .btn:not(.primary):not(.danger){
+background: #f7f8fb;
+color: var(--ink-soft);
+}
 #view-seat .js-sync-toggle-wrap{
 display:inline-flex !important; align-items:center; gap:6px;
-height: var(--control-h); padding: 0 8px;
+height: var(--control-h); padding: 0 10px;
 border:1px solid var(--line); border-radius:6px; background:#fff;
 font-size:0.88em; color: var(--ink);
 }
@@ -366,29 +444,48 @@ font-size:0.88em; color: var(--ink);
 background: #f7f9fc;
 border-color: var(--line);
 }
-#view-seat .legend{ margin-top: 4px; }
+#view-seat .legend{ margin-top: 8px; margin-bottom: 14px; }
+
+#view-seat input:focus,
+#view-seat select:focus{
+outline: 2px solid var(--blue);
+outline-offset: 1px;
+border-color: var(--blue);
+}
 
 /* Lesson blocks */
-#view-seat .blocks{ gap: 28px; }
+#view-seat .blocks{ gap: 40px; }
 #view-seat .lesson-block{
 background:#fff;
-border:1px solid var(--line);
-border-left: 4px solid var(--blue);
+border:1px solid #c5cedc;
+border-left: 6px solid var(--blue);
 border-radius: var(--radius);
 box-shadow: none;
 overflow:hidden;
 }
 #view-seat .block-head{
-background: #f3f6fb;
-border-bottom: 1px solid var(--line);
-padding: 14px 16px;
-gap: 12px;
+background: #e8eef8;
+border-bottom: 1px solid #c5cedc;
+padding: 16px 18px;
+gap: 14px;
+}
+#view-seat .block-head-left{
+align-items: center;
+gap: 14px 18px;
 }
 #view-seat .block-index{
-font-size:0.92em; padding: 5px 12px;
+font-size:1em; padding: 6px 14px;
+letter-spacing: 0.02em;
+}
+#view-seat .block-teachers{
+display:block;
+font-size: 1.05em;
+font-weight: 700;
+color: var(--blue-dark);
+line-height: 1.3;
 }
 #view-seat .time-input{
-font-size:0.95em; font-weight:600; color: var(--ink);
+font-size:1em; font-weight:700; color: var(--ink);
 }
 #view-seat .time-input input[type=time],
 #view-seat .time-choice select{
@@ -398,69 +495,109 @@ border:1px solid var(--line);
 border-radius:6px;
 background:#fff;
 font-size:0.95em;
+font-weight: 600;
 }
-#view-seat .time-input input[type=time]{ width: 118px; }
+#view-seat .time-input input[type=time]{ width: 124px; }
 #view-seat .block-actions{ gap:8px; }
+#view-seat .block-actions .btn:not(.primary):not(.danger){
+background: #fff;
+color: var(--ink-soft);
+}
 
 /* Sheet: seat number first, then teacher; keep left/right pairing */
-#view-seat .sheet{ min-width: 920px; }
+#view-seat .sheet{ min-width: 1080px; }
 #view-seat .sheet-header,
 #view-seat .seat-row-wrap,
 #view-seat .group-row-wrap{
-grid-template-columns: 72px 148px 96px 56px minmax(170px,1fr) 96px 56px minmax(170px,1fr);
+grid-template-columns: 84px 168px 88px 52px minmax(200px,1fr) 88px 52px minmax(200px,1fr);
 }
 #view-seat .cell{
-min-height: 56px;
-padding: 8px;
+min-height: 62px;
+padding: 8px 10px;
+border-bottom: 1px solid #cfd6e2;
+border-right: 1px solid #e2e7ef;
 }
 #view-seat .cell select,
 #view-seat .cell input{
 height: var(--control-h);
 padding: 0 8px;
 font-size: 0.95em;
+background: #fff;
+border: 1px solid #c5cedc;
 }
 #view-seat .seat-num-cell{
-background: #eef2f8;
+background: #dce6f4;
 align-items: stretch;
 }
-#view-seat .seat-row-wrap.alt-row .seat-num-cell{ background: #e7edf6; }
+#view-seat .seat-row-wrap.alt-row .cell{ background: #f3f6fb; }
+#view-seat .seat-row-wrap.alt-row .seat-num-cell{ background: #d3deee; }
 #view-seat .seat-num-cell input.js-seat-num,
 #view-seat .seat-num-cell input.js-g-seat-num{
-font-size: 1.15em;
-font-weight: 700;
+font-size: 1.35em;
+font-weight: 800;
 font-variant-numeric: tabular-nums;
 text-align: center;
 letter-spacing: 0.02em;
 color: var(--ink);
 background: #fff;
+border: 1.5px solid #8fa0bc;
+height: 42px;
 }
 #view-seat .teacher-col select{
 font-weight: 700;
-font-size: 1em;
+font-size: 1.05em;
 color: var(--blue-dark);
 }
 #view-seat .student-select{
 font-weight: 700;
-font-size: 1em;
+font-size: 1.05em;
 color: var(--ink);
 }
 #view-seat .subject-select{
-font-weight: 600;
-font-size: 0.95em;
-color: var(--ink);
+font-weight: 500;
+font-size: 0.88em;
+color: var(--ink-soft);
 }
 #view-seat .grade-input{
 font-weight: 500;
-font-size: 0.82em;
+font-size: 0.8em;
 color: var(--ink-soft);
 text-align: center;
 }
-#view-seat .status-buttons{ gap: 4px; }
+#view-seat .status-buttons{
+gap: 4px;
+margin-top: 2px;
+}
 #view-seat .status-buttons button{
-font-size: 0.78em;
-padding: 4px 8px;
-min-height: 28px;
+font-size: 0.75em;
+padding: 3px 7px;
+min-height: 24px;
 color: var(--ink-soft);
+background: #fff;
+}
+#view-seat .student-cell{
+background: #fff !important;
+box-shadow: none;
+}
+#view-seat .student-cell.status-course{
+background: #f6f8fd !important;
+box-shadow: inset 4px 0 0 #3f6fd6;
+}
+#view-seat .student-cell.status-transfer{
+background: #f5faf6 !important;
+box-shadow: inset 4px 0 0 #2e8b57;
+}
+#view-seat .student-cell.status-absent{
+background: #fdf7f6 !important;
+box-shadow: inset 4px 0 0 #c0392b;
+}
+#view-seat .student-cell.trial-active{
+background: #fffdf3 !important;
+box-shadow: inset 4px 0 0 #d4a017;
+}
+#view-seat .student-cell:has(.js-solo-toggle.active){
+background: #faf6fc !important;
+box-shadow: inset 4px 0 0 #8e44ad;
 }
 #view-seat .sheet-wrap{
 overflow-x: auto;
@@ -476,27 +613,28 @@ position: sticky; left: 0; z-index: 2;
 #view-seat .sheet-header:not(.sub) > :nth-child(2),
 #view-seat .seat-row-wrap > :nth-child(2),
 #view-seat .group-row-wrap > :nth-child(2){
-position: sticky; left: 72px; z-index: 2;
+position: sticky; left: 84px; z-index: 2;
 }
 #view-seat .sheet-header.sub > .th.blank2{
 position: sticky; left: 0; z-index: 3;
 }
 #view-seat .sheet-header:not(.sub) > :nth-child(1),
 #view-seat .sheet-header:not(.sub) > :nth-child(2),
-#view-seat .sheet-header.sub > .th.blank2{ background: #eef1f7; }
+#view-seat .sheet-header.sub > .th.blank2{ background: #e8eef8; }
 #view-seat .seat-row-wrap > :nth-child(2){ background: #fff; }
-#view-seat .seat-row-wrap.alt-row > :nth-child(2){ background: var(--row-alt); }
+#view-seat .seat-row-wrap.alt-row > :nth-child(2){ background: #f3f6fb; }
 #view-seat .group-row-wrap > :nth-child(1),
 #view-seat .group-row-wrap > :nth-child(2){ background: #faf8ff; }
+}
+
+@media screen and (max-width: 1100px){
+#view-seat .seat-toolbar{ grid-template-columns: 1fr; }
 }
 
 @media screen and (max-width: 860px){
 #view-seat{ --control-h: 40px; }
 #view-seat .page-head{ padding: 12px; }
-#view-seat .toolbar-group{
-flex-direction: column; align-items: stretch; gap: 6px;
-}
-#view-seat .toolbar-label{ min-width: 0; }
+#view-seat .toolbar-group{ gap: 6px; }
 #view-seat .btn-row{ width: 100%; }
 #view-seat .btn{ min-height: 40px; }
 #view-seat .block-head{ align-items: flex-start; }
@@ -568,8 +706,14 @@ width: calc(100% / var(--print-page-scale, 1));
 --print-grade-col: calc(var(--print-grade-size, 7.5pt) * 2 + 2.5mm);
 }
 /* プレビューは見た目を印刷に寄せつつ、クリックして編集できる状態を保つ。
-   未選択のセレクトは文字だけ透明にして、当たり判定は残す。 */
-.print-preview-page .cell select[data-empty-sel="1"]{ color:transparent; }
+   未選択のセレクト／空の入力は文字も枠も出さず、空席は純粋な空白にする。
+   座席表画面（#view-seat）には適用しない。 */
+.print-preview-page .cell select:has(option[value=""]:checked),
+.print-preview-page .cell select[data-empty-sel="1"],
+.print-preview-page .cell input:placeholder-shown{
+visibility: hidden;
+}
+.print-preview-page .cell input::placeholder{ color:transparent !important; }
 /* 編集モード（「印刷と同じ見た目」をOFF）では画面で扱いやすい大きさに戻す */
 /* 編集モードでも用紙の高さは保つ。height:auto にすると % で置いた
    画像の基準が変わり、印刷時に位置がずれるため。 */
@@ -578,37 +722,37 @@ html[data-print-look="0"] .print-preview-page{
 width:min(1400px, 100%) !important; transform:none !important;
 }
 html[data-print-look="0"] .print-preview-wrap{ height:auto !important; overflow:auto !important; }
-/* 1対1（eWebで斜線）の相手側セル。
-   背景画像だとChromeの「背景のグラフィック」がオフのとき印刷されないため、
-   通常の img として斜線を描く（設定に依存せず必ず印刷される）。 */
-.cell.solo-blocked select,
-.cell.solo-blocked input{ visibility:hidden; }
-/* 斜線はCSSのみで描く（JSでの座標計算はやめた）。
-   本当の印刷はブラウザ自身が @media print で別途描き直すため、
-   JSで測った座標をその瞬間に正確に反映させ続けるのは無理があった。
-   CSSの repeating-linear-gradient は要素自身のサイズに対して
-   常にブラウザが正しく計算するので、プレビューと実際の印刷で
-   ズレる余地がない。3セルの継ぎ目は完全には揃わないが、
-   位置が丸ごとズレるよりはるかに軽微。
-   ※ Chromeの印刷設定で「背景のグラフィック」を
-   オンにする必要がある。 */
-/* 間隔を広くして繰り返し回数を減らす。細かすぎる繰り返しパターンは
-   一部のコピー機のRIP（印刷データ処理）で「展開中」のまま
-   止まってしまうことがあるため、負荷を下げる。
-   色は薄いグレーだと白黒印刷モードや低画質設定で飛ばされることが
-   あるため、黒に近い濃さにして線も太くする。 */
+/* 1対1の斜線。セル内SVG実要素のみ（背景画像は使わない）。
+   画面・プレビュー・印刷で同じ見た目。背景グラフィックOFFでも紙に出る。 */
 .cell.solo-blocked{
-/* repeating-linear-gradientは一部プリンターのRIP処理で
-   「展開中」のまま固まる（受信データ量が異常に膨れる）事故が
-   何度か起きたため、単純な画像（SVGタイル）の繰り返し貼り付けに
-   変更した。RIPにとっては「1枚の画像を並べるだけ」で済むため、
-   計算量が跳ね上がる余地がない。
-   縮小率（--print-page-scale）が小さいときはタイルも大きくして、
-   実際に印刷される線の間隔が細かくなりすぎないようにする。 */
-background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='40' height='40'%3E%3Cline x1='0' y1='40' x2='40' y2='0' stroke='%23000' stroke-width='4'/%3E%3C/svg%3E");
-background-repeat: repeat;
-background-size: calc(40px / var(--print-page-scale, 1)) calc(40px / var(--print-page-scale, 1));
--webkit-print-color-adjust: exact; print-color-adjust: exact;
+position: relative;
+overflow: hidden !important;
+background-image: none;
+}
+.cell.solo-blocked select,
+.cell.solo-blocked input,
+.cell.solo-blocked .status-buttons{
+visibility: hidden;
+pointer-events: none;
+}
+.solo-slash-mark{
+display: block;
+position: absolute;
+top: 3px;
+left: 3px;
+width: calc(100% - 6px);
+height: calc(100% - 6px);
+overflow: hidden;
+pointer-events: none;
+z-index: 1;
+box-sizing: border-box;
+}
+#view-seat .cell.solo-blocked,
+#view-seat .seat-row-wrap.alt-row .cell.solo-blocked{
+background-image: none;
+}
+#view-seat .solo-slash-mark{
+display: block;
 }
 /* 折りたたみ用 */
 .print-panel-toggle{ margin:0 0 4px; }
@@ -632,6 +776,7 @@ grid-template-columns: 32px 90px 84px 40px minmax(0,1fr) 84px 40px minmax(0,1fr)
 .print-preview-page .cell select, .print-preview-page .cell input{ border:none; background:transparent; padding:0; color:#000; }
 .print-preview-page .subject-select{ font-size: var(--print-subject-size) !important; font-weight:900; text-align:center; overflow:visible; white-space:nowrap; }
 .print-preview-page .cell{ overflow:visible; }
+.print-preview-page .cell.solo-blocked{ overflow:hidden !important; position:relative; background-image:none; }
 .print-preview-page .student-select{ font-size: var(--print-student-size) !important; font-weight:700; }
 .print-preview-page .grade-input{ font-size: var(--print-grade-size) !important; text-align:center; }
 .print-preview-page .teacher-col select{ font-size:9pt; }
@@ -699,11 +844,13 @@ padding:2mm 0;
 -webkit-appearance:none; appearance:none; }
 /* 空欄のplaceholder（—・学年 など）は紙に出さない */
 .cell input::placeholder{ color:transparent !important; }
+.cell input:placeholder-shown{ visibility:hidden !important; }
 /* 科目は列に収まる範囲で表示（あふれた文字は隠す） */
 .seat-row-wrap > .cell:nth-child(3) input,
 .seat-row-wrap > .cell:nth-child(6) input{ text-overflow:clip; overflow:hidden; }
 /* 未選択のセレクト（生徒を選択・— など）は空白にする */
-.cell select[data-empty-sel="1"]{ visibility:hidden !important; }
+.cell select[data-empty-sel="1"],
+.cell select:has(option[value=""]:checked){ visibility:hidden !important; }
 .teacher-col select{ font-size:8.5pt; }
 /* subject is the #1 print priority: largest, boldest */
 .subject-select{ font-size: var(--print-subject-size) !important; font-weight:900 !important; text-align:center; }
@@ -711,6 +858,24 @@ padding:2mm 0;
 .grade-input{ font-size: var(--print-grade-size) !important; text-align:center; }
 .seat-num-cell input{ font-size:8pt; border:none; text-align:center; }
 .student-cell.status-course{ background:#e4ecff !important; -webkit-print-color-adjust:exact; print-color-adjust:exact; }
+/* 1対1の斜線はセル内SVG実要素。背景画像は使わない。 */
+.cell.solo-blocked{
+position: relative !important;
+overflow: hidden !important;
+background-image: none !important;
+}
+.solo-slash-mark,
+#view-seat .solo-slash-mark{
+display: block !important;
+position: absolute;
+top: 3px;
+left: 3px;
+width: calc(100% - 6px);
+height: calc(100% - 6px);
+overflow: hidden;
+pointer-events: none;
+z-index: 1;
+}
 /* 振替は背景色に頼らず、太い枠線と「振」の印で示す。
    Chromeの「背景のグラフィック」がオフだと背景色は印刷されないため。 */
 .student-cell.status-transfer{
@@ -747,4 +912,36 @@ padding:0 !important; border:none !important; box-shadow:none !important;
 .seat-row-wrap, .group-row-wrap{ min-height: var(--print-row-h, 0px); }
 .group-time-auto{ font-size:7.5pt; color:#000; white-space:normal; line-height:1.15; min-width:0; overflow-wrap:anywhere; }
 .group-time-inline{ font-size:7.5pt; color:#000; white-space:normal; min-width:0; overflow-wrap:anywhere; }
+
+/* 複数日印刷: 画面には出さず、印刷時だけ1日1ページで出す */
+#multiDayPrint{ display:none !important; }
+body.multi-day-print .topbar,
+body.multi-day-print .tabs,
+body.multi-day-print #app,
+body.multi-day-print .toast,
+body.multi-day-print #modalRoot{
+display:none !important;
+}
+body.multi-day-print #multiDayPrint{
+display:block !important;
+}
+body.multi-day-print .multi-print-page{
+break-after: page;
+page-break-after: always;
+width: calc(100% / var(--print-page-scale, 1)) !important;
+height: var(--paper-h) !important;
+padding:0 !important; border:none !important; box-shadow:none !important;
+transform: none !important;
+position: relative;
+}
+body.multi-day-print .multi-print-page:last-child{
+break-after: auto;
+page-break-after: auto;
+}
+#btnImportEweb,
+#view-settings a.btn.primary[href^="javascript:"]{
+background: none !important;
+color: inherit !important;
+border-color: transparent !important;
+}
 }
