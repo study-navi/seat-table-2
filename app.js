@@ -14,6 +14,10 @@ var SESSION_STORAGE = window.__seatSessionStorageOverride || window.sessionStora
 ========================================================= */
 
 const STORAGE_KEY = "seat-table-v1";
+/* 教室識別子。他教室のindex.htmlでは window.__seatClassroomId で上書きする。 */
+const CLASSROOM_ID = window.__seatClassroomId || "seat-table-classroom-1";
+const GOOGLE_BACKUP_CFG_KEY = "seat-table-google-backup";
+const GOOGLE_BACKUP_STATUS_KEY = "seat-table-google-backup-status";
 
 const WEEKDAY_LABELS = ["日","月","火","水","木","金","土"];
 
@@ -40,6 +44,7 @@ let currentDate = todayStr();
 let currentTab = "seat";
 let studentSearch = "";
 let teacherWarnCache = new Set(); // teacher names currently in use somewhere
+let historyView = null; // 過去の座席表表示中 { snapshotState, savedAt, kind, fileId, targetDate, fileName }
 
 function todayStr(){
 const d = new Date();
@@ -132,30 +137,496 @@ return data;
 
 let saveTimer = null;
 function saveState(){
+if(historyView) return;
 setSaveIndicator("saving");
 try{
 STORAGE.setItem(STORAGE_KEY, JSON.stringify(state));
 clearTimeout(saveTimer);
-saveTimer = setTimeout(()=> setSaveIndicator("ok"), 250);
+saveTimer = setTimeout(()=> applyGoogleBackupUi(), 250);
+scheduleGoogleBackup();
 }catch(e){
 setSaveIndicator("error");
 showToast("保存に失敗しました（ブラウザのストレージ容量を確認してください）", true);
 }
 }
-function setSaveIndicator(mode){
+function getLiveState(){ return state; }
+function getDisplayState(){ return historyView ? historyView.snapshotState : state; }
+function isHistoryView(){ return !!historyView; }
+function setSaveIndicator(mode, customText){
 const el = document.getElementById("saveIndicator");
 const text = document.getElementById("saveIndicatorText");
+if(!el || !text) return;
 el.classList.remove("saving","error");
-if(mode==="saving"){ el.classList.add("saving"); text.textContent = "保存中…"; }
-else if(mode==="error"){ el.classList.add("error"); text.textContent = "保存に失敗しました"; }
-else{ text.textContent = "この端末に自動保存"; }
+if(mode==="saving"){ el.classList.add("saving"); text.textContent = customText || "保存中…"; }
+else if(mode==="error"){ el.classList.add("error"); text.textContent = customText || "保存に失敗しました"; }
+else{ text.textContent = customText || (getGoogleBackupConfig() && loadGoogleBackupStatus().phase === "ok" ? "Googleに履歴保存済み" : "この端末に自動保存"); }
+}
+
+/* =========================================================
+Google自動バックアップ（端末内保存の追加の安全対策）
+生徒名などの中身は画面・URL・consoleに出さない。
+========================================================= */
+let googleBackupTimer = null;
+let googleBackupInFlight = false;
+let googleBackupAgain = false;
+
+function getGoogleBackupConfig(){
+let raw = null;
+try{ raw = STORAGE.getItem(GOOGLE_BACKUP_CFG_KEY); }catch(e){ return null; }
+if(!raw) return null;
+try{
+const cfg = JSON.parse(raw);
+const url = String(cfg && cfg.webAppUrl ? cfg.webAppUrl : "").trim();
+const token = String(cfg && cfg.token ? cfg.token : "");
+if(!url || !token) return null;
+if(cfg.classroomId && cfg.classroomId !== CLASSROOM_ID) return null;
+return { webAppUrl: url, token: token };
+}catch(e){ return null; }
+}
+function saveGoogleBackupConfig(webAppUrl, token){
+STORAGE.setItem(GOOGLE_BACKUP_CFG_KEY, JSON.stringify({
+classroomId: CLASSROOM_ID,
+webAppUrl: String(webAppUrl || "").trim(),
+token: String(token || "")
+}));
+}
+function loadGoogleBackupStatus(){
+let raw = null;
+try{ raw = STORAGE.getItem(GOOGLE_BACKUP_STATUS_KEY); }catch(e){}
+if(!raw) return { phase: getGoogleBackupConfig() ? "ok" : "unset", lastOkAt: "", lastError: "", lastFileName: "" };
+try{
+const s = JSON.parse(raw);
+return {
+phase: s.phase || (getGoogleBackupConfig() ? "ok" : "unset"),
+lastOkAt: s.lastOkAt || "",
+lastError: s.lastError || "",
+lastFileName: s.lastFileName || ""
+};
+}catch(e){
+return { phase: "unset", lastOkAt: "", lastError: "", lastFileName: "" };
+}
+}
+function persistGoogleBackupStatus(s){
+try{ STORAGE.setItem(GOOGLE_BACKUP_STATUS_KEY, JSON.stringify({
+phase: s.phase,
+lastOkAt: s.lastOkAt || "",
+lastError: s.lastError || "",
+lastFileName: s.lastFileName || ""
+})); }catch(e){}
+}
+function formatBackupTime(iso){
+if(!iso) return "—";
+const d = new Date(iso);
+if(isNaN(d.getTime())) return "—";
+const p = n=> String(n).padStart(2,"0");
+return `${d.getFullYear()}年${d.getMonth()+1}月${d.getDate()}日 ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+function googleErrorMessage(code){
+const map = {
+unauthorized: "教室IDまたは合言葉が正しくありません。",
+classroom_mismatch: "このWebアプリは別の教室用です。URLを確認してください。",
+not_setup: "Google側の初回セットアップがまだです。",
+invalid_payload: "バックアップデータの形式が正しくありません。",
+no_backup: "Google側にまだ履歴がありません。",
+not_found: "指定の履歴が見つかりません。",
+bad_response: "Googleからの応答を読めませんでした。",
+failed: "Googleへの保存に失敗しました。",
+server_error: "Google側でエラーが起きました。",
+offline: "ネット未接続のためGoogleへ保存できませんでした。"
+};
+return map[code] || "Googleへの保存に失敗しました。";
+}
+function postGoogleBackupApi(action, extra){
+const cfg = getGoogleBackupConfig();
+if(!cfg) return Promise.reject(new Error("unset"));
+if(typeof navigator !== "undefined" && navigator.onLine === false){
+return Promise.reject(new Error("offline"));
+}
+const body = {
+action: action,
+classroomId: CLASSROOM_ID,
+token: cfg.token
+};
+if(action === "backup" || action === "finalizeLesson"){
+let snapshot = extra && extra.json;
+if(!snapshot){
+try{ snapshot = JSON.parse(STORAGE.getItem(STORAGE_KEY)); }catch(e){ snapshot = null; }
+}
+if(!snapshot || typeof snapshot !== "object") snapshot = getLiveState();
+body.json = snapshot;
+body.targetDate = (extra && extra.targetDate) || currentDate;
+}
+if(action === "snapshot"){
+body.fileId = extra && extra.fileId;
+if(!body.fileId) return Promise.reject(new Error("invalid_payload"));
+}
+return fetch(cfg.webAppUrl, {
+method: "POST",
+headers: { "Content-Type": "text/plain;charset=utf-8" },
+body: JSON.stringify(body)
+}).then(res=>{
+return res.text().then(text=>{
+let data = null;
+try{ data = JSON.parse(text); }catch(e){ throw new Error("bad_response"); }
+if(!data || !data.ok) throw new Error((data && data.error) || "failed");
+if(data.classroomId && data.classroomId !== CLASSROOM_ID) throw new Error("classroom_mismatch");
+return data;
+});
+});
+}
+function applyGoogleBackupUi(){
+const s = loadGoogleBackupStatus();
+if(googleBackupInFlight) s.phase = "saving";
+if(!getGoogleBackupConfig()){
+if(!googleBackupInFlight) setSaveIndicator("ok", "この端末に自動保存");
+}else if(s.phase === "saving"){
+setSaveIndicator("saving", "Googleへバックアップ中…");
+}else if(s.phase === "error"){
+setSaveIndicator("error", "Googleバックアップ失敗");
+}else if(s.phase === "ok"){
+setSaveIndicator("ok", "Googleに履歴保存済み");
+}
+const box = document.getElementById("googleBackupStatusBox");
+if(!box) return;
+box.innerHTML = googleBackupStatusHtml(s);
+}
+function googleBackupStatusHtml(s){
+const configured = !!getGoogleBackupConfig();
+const phase = !configured ? "unset" : (googleBackupInFlight ? "saving" : s.phase);
+let err = "";
+if(configured && phase === "error" && s.lastError) err = `<p class="google-backup-error">${escapeHtml(googleErrorMessage(s.lastError))}</p>`;
+return `
+<p><strong>現在の状態：</strong>${escapeHtml(
+phase === "unset" ? "未設定" :
+phase === "saving" ? "バックアップ中" :
+phase === "error" ? "エラー" :
+(s.lastOkAt ? "Googleに履歴保存済み" : "設定済み（まだ履歴なし）")
+)}</p>
+<p><strong>最終保存日時：</strong>${escapeHtml(formatBackupTime(s.lastOkAt))}</p>
+${err}
+`;
+}
+function scheduleGoogleBackup(){
+if(!getGoogleBackupConfig()) return;
+clearTimeout(googleBackupTimer);
+googleBackupTimer = setTimeout(()=> runGoogleBackup(false), 1500);
+}
+function runGoogleBackup(urgent){
+if(!getGoogleBackupConfig()) return Promise.resolve();
+clearTimeout(googleBackupTimer);
+if(googleBackupInFlight){
+googleBackupAgain = true;
+return Promise.resolve();
+}
+googleBackupInFlight = true;
+googleBackupAgain = false;
+const prev = loadGoogleBackupStatus();
+persistGoogleBackupStatus(Object.assign({}, prev, { phase: "saving" }));
+applyGoogleBackupUi();
+return postGoogleBackupApi("backup", { json: getLiveState(), targetDate: currentDate }).then(data=>{
+persistGoogleBackupStatus({
+phase: "ok",
+lastOkAt: data.updatedAt || new Date().toISOString(),
+lastError: "",
+lastFileName: data.fileName || ""
+});
+}).catch(err=>{
+const code = (err && err.message) ? String(err.message) : "failed";
+persistGoogleBackupStatus({
+phase: "error",
+lastOkAt: prev.lastOkAt || "",
+lastError: code,
+lastFileName: prev.lastFileName || ""
+});
+}).finally(()=>{
+googleBackupInFlight = false;
+applyGoogleBackupUi();
+if(googleBackupAgain){
+googleBackupAgain = false;
+scheduleGoogleBackup();
+}
+});
+}
+function confirmThenBackup(message, onConfirm){
+confirmDialog(message, ()=>{
+const go = ()=>{ try{ onConfirm(); }catch(e){} };
+if(!getGoogleBackupConfig()){ go(); return; }
+showToast("削除前にGoogleへバックアップしています…");
+runGoogleBackup(true).then(go, go);
+});
+}
+function dayStats(day){
+const blocks = (day && day.blocks) || [];
+let groups = 0, seats = 0;
+blocks.forEach(b=>{
+seats += (b.seats || []).length;
+groups += (b.groupRows || []).length;
+});
+return { blocks: blocks.length, seats, groups };
 }
 
 function getOrCreateDay(dateStr){
+if(historyView){
+const d = historyView.snapshotState.days && historyView.snapshotState.days[dateStr];
+return d || { blocks: [] };
+}
 if(!state.days[dateStr]){
 state.days[dateStr] = { blocks: COMMON_TIME_PRESETS.map(()=>emptyBlock()) };
 }
 return state.days[dateStr];
+}
+function historyKindLabel(kind){
+return kind === "finalized" ? "保存した授業" : "自動保存";
+}
+function formatHistorySavedAt(iso){
+return formatBackupTime(iso);
+}
+function formatHistoryDateLabel(dateStr){
+if(!dateStr) return "日付不明";
+const [y,m,d] = dateStr.split("-").map(Number);
+if(!y) return dateStr;
+const wd = weekdayOf(dateStr);
+return `${y}年${m}月${d}日（${WEEKDAY_LABELS[wd]}）`;
+}
+function summarizeDayBlocks(day){
+const blocks = (day && day.blocks) || [];
+return blocks.map(block=>{
+const students = new Set();
+let mainSubject = "";
+let mainTeacher = "";
+(block.seats || []).forEach(seat=>{
+if(seat.teacher && !mainTeacher) mainTeacher = seat.teacher;
+["left","right"].forEach(side=>{
+const cell = seat[side] || {};
+if(cell.student) students.add(cell.student);
+if(cell.subject && !mainSubject) mainSubject = cell.subject;
+});
+});
+(block.groupRows || []).forEach(g=>{
+if(g.teacher && !mainTeacher) mainTeacher = g.teacher;
+if(g.subject && !mainSubject) mainSubject = g.subject;
+(g.students || []).forEach(n=>{ if(n) students.add(n); });
+});
+return {
+time: block.time || "時間未設定",
+subject: mainSubject || "—",
+teacher: mainTeacher || "—",
+studentCount: students.size
+};
+}).filter(row=> row.studentCount > 0 || (row.time && row.time !== "時間を入力"));
+}
+function groupHistoryItems(items){
+const map = {};
+(items || []).forEach(item=>{
+const key = item.targetDate || "unknown";
+if(!map[key]) map[key] = { targetDate: key, items: [], finalizedAt: "" };
+map[key].items.push(item);
+if(item.kind === "finalized"){
+const cur = map[key].finalizedAt;
+if(!cur || String(item.savedAt) > cur) map[key].finalizedAt = item.savedAt;
+}
+});
+return Object.values(map).sort((a,b)=> String(b.targetDate).localeCompare(String(a.targetDate)));
+}
+function updateHistoryBanner(){
+let bar = document.getElementById("historyViewBanner");
+if(!historyView){
+if(bar) bar.remove();
+document.body.classList.remove("history-view-mode");
+return;
+}
+document.body.classList.add("history-view-mode");
+if(!bar){
+bar = document.createElement("div");
+bar.id = "historyViewBanner";
+bar.className = "history-view-banner";
+document.body.appendChild(bar);
+}
+const label = formatHistoryDateLabel(historyView.targetDate || currentDate);
+const timeLabel = formatHistorySavedAt(historyView.savedAt);
+bar.innerHTML = `
+<div class="history-view-banner-inner">
+<span class="history-view-banner-text">過去の座席表を表示中：${escapeHtml(label)} ${escapeHtml(timeLabel)}（${escapeHtml(historyKindLabel(historyView.kind))}）</span>
+<div class="history-view-banner-actions">
+<button type="button" class="btn" id="btnHistoryBackToNow">現在に戻る</button>
+<button type="button" class="btn primary" id="btnHistoryRestorePoint">この時点に復元</button>
+</div>
+</div>`;
+bar.querySelector("#btnHistoryBackToNow").addEventListener("click", exitHistoryView);
+bar.querySelector("#btnHistoryRestorePoint").addEventListener("click", restoreFromHistoryPoint);
+}
+function exitHistoryView(){
+historyView = null;
+updateHistoryBanner();
+if(currentTab === "seat") renderSeatView();
+else renderCurrentView();
+showToast("現在の座席表に戻りました");
+}
+function restoreFromHistoryPoint(){
+if(!historyView) return;
+const label = formatHistorySavedAt(historyView.savedAt);
+confirmDialog(`この履歴（${label}）の時点に座席表を復元します。現在のデータは履歴として保存したうえで置き換えます。よろしいですか？`, ()=>{
+if(!getGoogleBackupConfig()){
+showToast("先にGoogle連携を設定してください", true);
+return;
+}
+const snap = historyView.snapshotState;
+const restoreDate = historyView.targetDate;
+showToast("現在のデータを履歴保存してから復元しています…");
+runGoogleBackup(true).then(()=>{
+state = migrate(JSON.parse(JSON.stringify(snap)));
+historyView = null;
+updateHistoryBanner();
+if(restoreDate) currentDate = restoreDate;
+saveState();
+renderTabs();
+renderCurrentView();
+showToast("履歴の時点に復元しました");
+}, ()=>{
+state = migrate(JSON.parse(JSON.stringify(snap)));
+historyView = null;
+updateHistoryBanner();
+if(restoreDate) currentDate = restoreDate;
+saveState();
+renderTabs();
+renderCurrentView();
+showToast("履歴の時点に復元しました（履歴保存はスキップ）");
+});
+});
+}
+function openHistorySnapshot(fileId){
+if(!fileId) return;
+showToast("履歴を読み込んでいます…");
+postGoogleBackupApi("snapshot", { fileId }).then(data=>{
+if(data.classroomId && data.classroomId !== CLASSROOM_ID){
+showToast("別教室の履歴は表示できません", true);
+return;
+}
+if(!data.json || typeof data.json !== "object"){
+showToast("履歴データが空でした", true);
+return;
+}
+historyView = {
+fileId: data.fileId,
+fileName: data.fileName || "",
+savedAt: data.savedAt || "",
+kind: data.kind || "auto",
+targetDate: data.targetDate || currentDate,
+snapshotState: migrate(JSON.parse(JSON.stringify(data.json)))
+};
+if(historyView.targetDate) currentDate = historyView.targetDate;
+closeModal();
+currentTab = "seat";
+renderTabs();
+renderSeatView();
+updateHistoryBanner();
+}).catch(err=>{
+showToast(googleErrorMessage(err && err.message), true);
+});
+}
+function openLessonHistoryModal(){
+if(!getGoogleBackupConfig()){
+showToast("先に「設定・バックアップ」でGoogle連携を設定してください", true);
+return;
+}
+openModal(`
+<h3>授業履歴</h3>
+<p class="sub">Googleに保存された座席表の履歴です。日付を選んで「表示する」で、その時点の座席表を開けます。</p>
+<div id="lessonHistoryLoading" class="history-loading">履歴を読み込んでいます…</div>
+<div id="lessonHistoryList" class="history-list" hidden></div>
+<div class="modal-actions">
+<button class="btn" id="modalCancel">閉じる</button>
+</div>
+`, (modal)=>{
+modal.querySelector("#modalCancel").addEventListener("click", closeModal);
+postGoogleBackupApi("history").then(data=>{
+if(data.classroomId && data.classroomId !== CLASSROOM_ID){
+modal.querySelector("#lessonHistoryLoading").textContent = "別教室の履歴です。";
+return;
+}
+const groups = groupHistoryItems(data.items || []);
+const listEl = modal.querySelector("#lessonHistoryList");
+const loadEl = modal.querySelector("#lessonHistoryLoading");
+if(!groups.length){
+loadEl.textContent = "まだ履歴がありません。座席表を編集するか『この授業を保存』を押すと保存されます。";
+return;
+}
+return Promise.all(groups.map(group=>{
+const top = group.items[0];
+if(!top || !top.fileId || group.targetDate === "unknown") return Promise.resolve(group);
+return postGoogleBackupApi("snapshot", { fileId: top.fileId }).then(snap=>{
+if(snap.classroomId && snap.classroomId !== CLASSROOM_ID) return group;
+const td = snap.targetDate || group.targetDate;
+const day = snap.json && snap.json.days && td ? snap.json.days[td] : null;
+group.previewBlocks = summarizeDayBlocks(day);
+return group;
+}).catch(()=> group);
+})).then(filledGroups=>{
+loadEl.hidden = true;
+listEl.hidden = false;
+listEl.innerHTML = filledGroups.map(group=>{
+const dateLabel = group.targetDate === "unknown" ? "日付不明" : formatHistoryDateLabel(group.targetDate);
+const blockLines = (group.previewBlocks || []).map(row=>
+`<li>${escapeHtml(row.time)}　${escapeHtml(row.subject)}　講師：${escapeHtml(row.teacher)}　生徒${row.studentCount}名</li>`
+).join("");
+const finalizedLine = group.finalizedAt
+? `<p class="history-finalized-note">この授業を保存：${escapeHtml(formatHistorySavedAt(group.finalizedAt))}に保存済み</p>`
+: "";
+const entriesHtml = group.items.map(item=>{
+const kind = historyKindLabel(item.kind);
+const saved = formatHistorySavedAt(item.savedAt);
+return `<div class="history-entry">
+<div class="history-entry-head">
+<span class="history-kind ${item.kind === "finalized" ? "finalized" : "auto"}">${escapeHtml(kind)}</span>
+<span class="history-saved-at">${escapeHtml(saved)}</span>
+</div>
+<button type="button" class="btn primary js-open-history" data-file-id="${escapeHtml(item.fileId)}">表示する</button>
+</div>`;
+}).join("");
+return `<section class="history-day-group">
+<h4>${escapeHtml(dateLabel)}</h4>
+${blockLines ? `<ul class="history-day-summary">${blockLines}</ul>` : ""}
+${finalizedLine}
+<div class="history-entries">${entriesHtml}</div>
+</section>`;
+}).join("");
+listEl.querySelectorAll(".js-open-history").forEach(btn=>{
+btn.addEventListener("click", ()=> openHistorySnapshot(btn.dataset.fileId));
+});
+});
+}).catch(err=>{
+modal.querySelector("#lessonHistoryLoading").textContent = googleErrorMessage(err && err.message);
+});
+});
+}
+function finalizeCurrentLesson(){
+if(historyView){ showToast("過去表示中は保存できません。「現在に戻る」を押してください。", true); return; }
+if(!getGoogleBackupConfig()){ showToast("先に「設定・バックアップ」でGoogle連携を設定してください", true); return; }
+confirmDialog("この座席表を保存します。後から履歴で確認できます。よろしいですか？", ()=>{
+showToast("この授業を保存しています…");
+const prev = loadGoogleBackupStatus();
+persistGoogleBackupStatus(Object.assign({}, prev, { phase: "saving" }));
+applyGoogleBackupUi();
+postGoogleBackupApi("finalizeLesson", { json: getLiveState(), targetDate: currentDate }).then(data=>{
+persistGoogleBackupStatus({
+phase: "ok",
+lastOkAt: data.updatedAt || new Date().toISOString(),
+lastError: "",
+lastFileName: data.fileName || ""
+});
+applyGoogleBackupUi();
+showToast("この授業を保存しました");
+}).catch(err=>{
+persistGoogleBackupStatus({
+phase: "error",
+lastOkAt: prev.lastOkAt || "",
+lastError: (err && err.message) || "failed",
+lastFileName: prev.lastFileName || ""
+});
+applyGoogleBackupUi();
+showToast(googleErrorMessage(err && err.message), true);
+});
+});
 }
 function emptyBlock(seatCount=8){
 return {
@@ -176,7 +647,7 @@ right: {student:"",subject:"",grade:"",status:"normal"}
 function allSubjectSuggestions(){
 const used = new Set(DEFAULT_SUBJECTS);
 state.customSubjects.forEach(s=> s && used.add(s));
-state.students.forEach(s=> s.subject && used.add(s.subject));
+state.students.forEach(s=> splitSubjectList(s.subject).forEach(sub=> used.add(sub)));
 return Array.from(used);
 }
 function registerCustomSubject(val){
@@ -204,6 +675,130 @@ t._timer = setTimeout(()=>{ t.hidden = true; }, 3200);
 }
 function jaCollator(){
 return new Intl.Collator("ja");
+}
+const NEW_STUDENT_VALUE = "__new_student__";
+
+function rosterNameKey(name){
+return String(name == null ? "" : name).replace(/[\s\u3000]+/g, "");
+}
+function findStudentIndexByName(name){
+const key = rosterNameKey(name);
+if(!key) return -1;
+return state.students.findIndex(s=> rosterNameKey(s.name) === key);
+}
+function findTeacherIndexByName(name){
+const key = rosterNameKey(name);
+if(!key) return -1;
+return state.teachers.findIndex(t=> rosterNameKey(t.name) === key);
+}
+function splitSubjectList(raw){
+return String(raw == null ? "" : raw)
+.split(/[・･,、/／]+/)
+.map(s=> normalizeName(s))
+.filter(Boolean);
+}
+function mergeSubjectList(existing, incoming){
+const out = [];
+const seen = new Set();
+splitSubjectList(existing).concat(splitSubjectList(incoming)).forEach(part=>{
+const key = rosterNameKey(part).toLowerCase();
+if(!key || seen.has(key)) return;
+seen.add(key);
+out.push(part);
+});
+return out.join("・");
+}
+function ensureStudentOnRoster(name, extra){
+name = normalizeName(name);
+if(!name || name === NEW_STUDENT_VALUE) return { added: false, name: "" };
+const i = findStudentIndexByName(name);
+if(i >= 0){
+const s = state.students[i];
+if(extra){
+if(extra.grade && !String(s.grade || "").trim()) s.grade = extra.grade;
+if(extra.subject) s.subject = mergeSubjectList(s.subject, extra.subject);
+}
+return { added: false, name: s.name };
+}
+state.students.push({
+id: uid(),
+name,
+birthdate: "",
+grade: extra && extra.grade ? extra.grade : "",
+subject: extra && extra.subject ? mergeSubjectList("", extra.subject) : ""
+});
+return { added: true, name };
+}
+function ensureTeacherOnRoster(name){
+name = normalizeName(name);
+if(!name) return { added: false, name: "" };
+const i = findTeacherIndexByName(name);
+if(i >= 0) return { added: false, name: state.teachers[i].name };
+state.teachers.push({ id: uid(), name, subjects: "", note: "" });
+return { added: true, name };
+}
+function ensureRosterFromDay(day){
+let students = 0, teachers = 0;
+(day && day.blocks || []).forEach(b=>{
+(b.seats || []).forEach(seat=>{
+if(ensureTeacherOnRoster(seat.teacher).added) teachers++;
+["left","right"].forEach(side=>{
+const cell = seat[side];
+if(cell && ensureStudentOnRoster(cell.student, { grade: cell.grade, subject: cell.subject }).added) students++;
+});
+});
+(b.groupRows || []).forEach(g=>{
+if(ensureTeacherOnRoster(g.teacher).added) teachers++;
+(g.students || []).forEach(n=>{
+if(ensureStudentOnRoster(n, { subject: g.subject }).added) students++;
+});
+});
+});
+return { students, teachers };
+}
+function openNewStudentModal(onOk, onCancel){
+openModal(`
+<h3>新しい生徒を追加</h3>
+<p class="sub">氏名を入力すると生徒名簿にも追加されます。</p>
+<input type="text" id="newStudentName" placeholder="氏名" autocomplete="off" style="width:100%;border:1px solid var(--line);border-radius:6px;padding:8px;">
+<div class="modal-actions">
+<button class="btn" id="modalCancel">キャンセル</button>
+<button class="btn primary" id="modalConfirm">追加する</button>
+</div>
+`, (modal)=>{
+const input = modal.querySelector("#newStudentName");
+input.focus();
+const cancel = ()=>{ closeModal(); if(onCancel) onCancel(); };
+modal.querySelector("#modalCancel").addEventListener("click", cancel);
+const confirm = ()=>{
+const name = normalizeName(input.value);
+if(!name){ showToast("氏名を入力してください", true); return; }
+closeModal();
+onOk(name);
+};
+modal.querySelector("#modalConfirm").addEventListener("click", confirm);
+input.addEventListener("keydown", (e)=>{
+if(e.key === "Enter"){ e.preventDefault(); confirm(); }
+});
+const backdrop = document.querySelector("#modalRoot .modal-backdrop");
+if(backdrop){
+backdrop.addEventListener("click", (e)=>{ if(e.target === backdrop && onCancel) onCancel(); });
+}
+});
+}
+function rosterStudentNames(selected){
+const src = getDisplayState();
+const names = src.students.map(s=> (s && s.name) ? String(s.name).trim() : "").filter(Boolean);
+const unique = [];
+const seen = new Set();
+names.forEach(n=>{
+if(seen.has(n)) return;
+seen.add(n);
+unique.push(n);
+});
+if(selected && !seen.has(selected)) unique.push(selected);
+unique.sort((a,b)=> jaCollator().compare(a, b));
+return unique;
 }
 function weekdayOf(dateStr){
 const [y,m,d] = dateStr.split("-").map(Number);
@@ -292,44 +887,47 @@ const day = getOrCreateDay(currentDate);
 const wd = weekdayOf(currentDate);
 const dateObj = new Date(currentDate+"T00:00:00");
 const dateLabel = `${dateObj.getFullYear()}年${dateObj.getMonth()+1}月${dateObj.getDate()}日（${WEEKDAY_LABELS[wd]}）`;
+const viewingPast = isHistoryView();
 
 el.innerHTML = `
 <div class="panel page-head">
 <div class="seat-date-bar">
-<h2>${dateLabel}</h2>
+<h2>${dateLabel}${viewingPast ? ` <span class="history-view-badge">履歴表示</span>` : ""}</h2>
 <label class="date-field">日付
-<input type="date" id="datePicker" value="${currentDate}">
+<input type="date" id="datePicker" value="${currentDate}" ${viewingPast ? "disabled" : ""}>
 </label>
 </div>
-${imagesHtml()}
-<div class="seat-toolbar">
-<div class="toolbar-group">
-<span class="toolbar-label">日付操作</span>
+<div class="seat-history-actions toolbar-group">
+<span class="toolbar-label">授業履歴</span>
 <div class="btn-row">
-<button class="btn" id="btnCopyLastWeek">先週をコピー</button>
+<button class="btn" id="btnLessonHistory">授業履歴</button>
+<button class="btn" id="btnCopyLastWeek" ${viewingPast ? "disabled" : ""}>先週をコピー</button>
+<button class="btn primary" id="btnFinalizeLesson" ${viewingPast ? "disabled" : ""}>この授業を保存</button>
 </div>
 </div>
+${viewingPast ? "" : imagesHtml()}
+<div class="seat-toolbar">
 <div class="toolbar-group">
 <span class="toolbar-label">座席操作</span>
 <div class="btn-row js-seat-actions">
-<button class="btn primary" id="btnAddBlock">＋ 授業枠を追加</button>
-<button class="btn danger" id="btnDeleteGroupRows">この日の集団行を削除</button>
-<button class="btn danger" id="btnDeleteAll">この日をすべて削除</button>
+<button class="btn primary" id="btnAddBlock" ${viewingPast ? "disabled" : ""}>＋ 授業枠を追加</button>
+<button class="btn danger" id="btnDeleteGroupRows" ${viewingPast ? "disabled" : ""}>この日の集団行を削除</button>
+<button class="btn danger" id="btnDeleteAll" ${viewingPast ? "disabled" : ""}>この日をすべて削除</button>
 </div>
 </div>
 <div class="toolbar-group">
 <span class="toolbar-label">共有操作</span>
 <div class="btn-row js-share-actions">
-<button class="btn" id="btnImportEweb">eWebから読み込む</button>
-<button class="btn" id="btnImportImage">画像から取り込み</button>
+<button class="btn" id="btnImportEweb" ${viewingPast ? "disabled" : ""}>eWebから読み込む</button>
+<button class="btn" id="btnImportImage" ${viewingPast ? "disabled" : ""}>画像から取り込み</button>
 <button class="btn" id="btnPrint">A3横で印刷</button>
-<button class="btn" id="btnPrintMulti">複数日を印刷</button>
+<button class="btn" id="btnPrintMulti" ${viewingPast ? "disabled" : ""}>複数日を印刷</button>
 </div>
 </div>
 </div>
 </div>
 
-<div class="preset-panel">
+${viewingPast ? "" : `<div class="preset-panel">
 <div>
 <div class="preset-title">基本曜日プリセット
 <small>曜日ごとのいつもの座席表を保存・呼び出し</small>
@@ -340,7 +938,7 @@ ${imagesHtml()}
 <button class="btn" id="btnLoadPreset">この曜日を呼び出す</button>
 <button class="btn primary" id="btnSavePreset">現在の表を${WEEKDAY_LABELS[wd]}曜日の基本に保存</button>
 </div>
-</div>
+</div>`}
 
 <div class="legend">
 <span><span class="swatch course"></span>講習</span>
@@ -357,39 +955,53 @@ ${subjectDatalist()}
 
 // weekday chips
 const grid = document.getElementById("weekdayGrid");
+if(grid){
+const presetSource = getDisplayState();
 grid.innerHTML = WEEKDAY_LABELS.map((label,i)=>{
-const hasPreset = !!(state.weekdayPresets[i] && state.weekdayPresets[i].blocks && state.weekdayPresets[i].blocks.length);
+const hasPreset = !!(presetSource.weekdayPresets[i] && presetSource.weekdayPresets[i].blocks && presetSource.weekdayPresets[i].blocks.length);
 return `<div class="weekday-chip ${i===wd?"selected":""} ${hasPreset?"has-preset":""}" data-wd="${i}">
 <span class="wd-label">${hasPreset?"登録済":"未登録"}</span>${label}
 </div>`;
 }).join("");
+}
 
-document.getElementById("datePicker").addEventListener("change", e=>{
+document.getElementById("btnLessonHistory").addEventListener("click", openLessonHistoryModal);
+document.getElementById("btnFinalizeLesson").addEventListener("click", finalizeCurrentLesson);
+
+const datePicker = document.getElementById("datePicker");
+if(datePicker && !viewingPast){
+datePicker.addEventListener("change", e=>{
 currentDate = e.target.value || todayStr();
 renderSeatView();
 });
+}
+updateHistoryBanner();
+if(!viewingPast){
 document.getElementById("btnAddBlock").addEventListener("click", ()=>{
 day.blocks.push(emptyBlock());
 saveState(); renderSeatView();
 });
 document.getElementById("btnDeleteAll").addEventListener("click", ()=>{
-confirmDialog(`${dateLabel} の座席表をすべて削除します。よろしいですか？`, ()=>{
+const st = dayStats(day);
+confirmThenBackup(`${dateLabel} の座席表をすべて削除します（授業枠 ${st.blocks}・席 ${st.seats}・集団行 ${st.groups}）。この日の内容は空になります。よろしいですか？`, ()=>{
 day.blocks = [];
 saveState(); renderSeatView();
 });
 });
 document.getElementById("btnDeleteGroupRows").addEventListener("click", ()=>{
-confirmDialog(`${dateLabel} の集団行だけをすべて削除します。よろしいですか？`, ()=>{
+const st = dayStats(day);
+confirmThenBackup(`${dateLabel} の集団行だけをすべて削除します（集団行 ${st.groups} 件）。座席の1対1／1対2はそのまま残ります。よろしいですか？`, ()=>{
 day.blocks.forEach(b=> b.groupRows = []);
 saveState(); renderSeatView();
 });
 });
-document.getElementById("btnPrint").addEventListener("click", ()=> window.print());
 document.getElementById("btnPrintMulti").addEventListener("click", openMultiDayPrintModal);
 document.getElementById("btnImportImage").addEventListener("click", openImageImportModal);
 document.getElementById("btnImportEweb").addEventListener("click", openEwebImportModal);
 document.getElementById("btnCopyLastWeek").addEventListener("click", openCopyLastWeekModal);
-document.getElementById("btnLoadPreset").addEventListener("click", ()=>{
+const btnLoadPreset = document.getElementById("btnLoadPreset");
+if(btnLoadPreset){
+btnLoadPreset.addEventListener("click", ()=>{
 const preset = state.weekdayPresets[wd];
 if(!preset || !preset.blocks.length){ showToast(`${WEEKDAY_LABELS[wd]}曜日の基本形はまだ登録されていません`, true); return; }
 confirmDialog(`${WEEKDAY_LABELS[wd]}曜日の基本形をこの日に読み込みます。現在のこの日の内容は上書きされます。よろしいですか？`, ()=>{
@@ -398,19 +1010,26 @@ migrate(state);
 saveState(); renderSeatView();
 });
 });
-document.getElementById("btnSavePreset").addEventListener("click", ()=>{
+}
+const btnSavePreset = document.getElementById("btnSavePreset");
+if(btnSavePreset){
+btnSavePreset.addEventListener("click", ()=>{
 confirmDialog(`現在のこの日の座席表を「${WEEKDAY_LABELS[wd]}曜日の基本形」として保存します。よろしいですか？`, ()=>{
 state.weekdayPresets[wd] = JSON.parse(JSON.stringify(day));
 saveState(); renderSeatView();
 });
 });
+}
+if(grid){
 grid.addEventListener("click", (e)=>{
 const chip = e.target.closest(".weekday-chip");
 if(!chip) return;
 const targetWd = Number(chip.dataset.wd);
-// find next date with that weekday (for quick jump), or just inform
 showToast(`${WEEKDAY_LABELS[targetWd]}曜日の基本形は「この曜日を呼び出す」ボタンで、その曜日の日付を選んだ状態で読み込めます。`);
 });
+}
+}
+document.getElementById("btnPrint").addEventListener("click", ()=> runMultiDayPrint([currentDate]));
 
 renderBlocks(day, dateLabel);
 }
@@ -527,8 +1146,9 @@ ${groupRows}
 }
 
 function seatRowHtml(block, seat, si, dateStr){
-const teacherOptions = `<option value="">—</option>` + state.teachers.map(t=>`<option value="${escapeHtml(t.name)}" ${seat.teacher===t.name?"selected":""}>${escapeHtml(t.name)}</option>`).join("");
-const studOpts = (selected)=> `<option value="">生徒を選択</option>` + state.students.map(s=>`<option value="${escapeHtml(s.name)}" ${selected===s.name?"selected":""}>${escapeHtml(s.name)}</option>`).join("");
+const roster = getDisplayState();
+const teacherOptions = `<option value="">—</option>` + roster.teachers.map(t=>`<option value="${escapeHtml(t.name)}" ${seat.teacher===t.name?"selected":""}>${escapeHtml(t.name)}</option>`).join("");
+const studOpts = (selected)=> `<option value="">生徒を選択</option><option value="${NEW_STUDENT_VALUE}">＋ 新しい生徒を追加</option>` + rosterStudentNames(selected).map(name=>`<option value="${escapeHtml(name)}" ${selected===name?"selected":""}>${escapeHtml(name)}</option>`).join("");
 const soloMap = loadSoloMapForDate(dateStr || currentDate);
 const leftName = normSoloName(seat.left && seat.left.student);
 const rightName = normSoloName(seat.right && seat.right.student);
@@ -575,8 +1195,9 @@ ${sideHtml(seat.right,"right", blockRight)}
 }
 
 function groupRowHtml(block, g, gi){
-const teacherOptions = `<option value="">—</option>` + state.teachers.map(t=>`<option value="${escapeHtml(t.name)}" ${g.teacher===t.name?"selected":""}>${escapeHtml(t.name)}</option>`).join("");
-const remainingStudents = state.students.filter(s=> !g.students.includes(s.name));
+const roster = getDisplayState();
+const teacherOptions = `<option value="">—</option>` + roster.teachers.map(t=>`<option value="${escapeHtml(t.name)}" ${g.teacher===t.name?"selected":""}>${escapeHtml(t.name)}</option>`).join("");
+const remainingStudents = rosterStudentNames().filter(name=> !g.students.includes(name));
 const chips = g.students.map(name=>`<span class="chip">${escapeHtml(name)}<button type="button" class="js-remove-gstudent" data-name="${escapeHtml(name)}">×</button></span>`).join("");
 return `
 <div class="group-row-wrap" data-group-index="${gi}">
@@ -600,7 +1221,8 @@ return `
 <div class="group-students-footer">
 <select class="js-g-add-student add-student-chip">
 <option value="">＋ 生徒を追加</option>
-${remainingStudents.map(s=>`<option value="${escapeHtml(s.name)}">${escapeHtml(s.name)}</option>`).join("")}
+<option value="${NEW_STUDENT_VALUE}">＋ 新しい生徒を追加</option>
+${remainingStudents.map(name=>`<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`).join("")}
 </select>
 <button type="button" class="btn danger js-del-group">削除</button>
 </div>
@@ -645,7 +1267,8 @@ day.blocks.splice(bi+1, 0, clone);
 saveState(); renderSeatView();
 });
 root.querySelector(".js-del-block").addEventListener("click", ()=>{
-confirmDialog("この授業枠を削除します。よろしいですか？", ()=>{
+const dateLabel2 = `${currentDate}（${block.time || "時間未設定"}）`;
+confirmThenBackup(`${dateLabel2} の授業枠を削除します（席 ${block.seats.length}・集団行 ${block.groupRows.length}）。この時間帯の内容はなくなります。よろしいですか？`, ()=>{
 day.blocks.splice(bi,1);
 saveState(); renderSeatView();
 });
@@ -691,7 +1314,13 @@ return;
 if(t.classList.contains("js-subject")){
 const idx = seatRowIndex(t);
 const side = t.dataset.side;
-if(idx>-1){ block.seats[idx][side].subject = t.value; registerCustomSubject(t.value); saveState(); }
+if(idx>-1){
+const cell = block.seats[idx][side];
+cell.subject = t.value;
+registerCustomSubject(t.value);
+if(cell.student) ensureStudentOnRoster(cell.student, { subject: t.value });
+saveState();
+}
 return;
 }
 if(t.classList.contains("js-grade")){
@@ -703,7 +1332,23 @@ return;
 if(t.classList.contains("js-student")){
 const idx = seatRowIndex(t);
 const side = t.dataset.side;
-if(idx>-1){ block.seats[idx][side].student = t.value; saveState(); }
+if(idx>-1){
+const cell = block.seats[idx][side];
+if(t.value === NEW_STUDENT_VALUE){
+const prev = cell.student || "";
+openNewStudentModal((name)=>{
+const ensured = ensureStudentOnRoster(name, { grade: cell.grade, subject: cell.subject });
+cell.student = ensured.name;
+saveState();
+renderTabs();
+renderSeatView();
+}, ()=>{ t.value = prev; });
+return;
+}
+cell.student = t.value;
+if(t.value) ensureStudentOnRoster(t.value, { grade: cell.grade, subject: cell.subject });
+saveState();
+}
 return;
 }
 if(t.classList.contains("js-g-teacher")){
@@ -722,7 +1367,13 @@ return;
 }
 if(t.classList.contains("js-g-subject")){
 const idx = groupRowIndex(t);
-if(idx>-1){ block.groupRows[idx].subject = t.value; registerCustomSubject(t.value); saveState(); }
+if(idx>-1){
+const g = block.groupRows[idx];
+g.subject = t.value;
+registerCustomSubject(t.value);
+(g.students || []).forEach(n=> ensureStudentOnRoster(n, { subject: t.value }));
+saveState();
+}
 return;
 }
 if(t.classList.contains("js-g-seat-num")){
@@ -733,7 +1384,19 @@ return;
 if(t.classList.contains("js-g-add-student")){
 const idx = groupRowIndex(t);
 if(idx>-1 && t.value){
-block.groupRows[idx].students.push(t.value);
+const g = block.groupRows[idx];
+if(t.value === NEW_STUDENT_VALUE){
+openNewStudentModal((name)=>{
+const ensured = ensureStudentOnRoster(name, { subject: g.subject });
+if(ensured.name && !g.students.includes(ensured.name)) g.students.push(ensured.name);
+saveState();
+renderTabs();
+renderSeatView();
+}, ()=>{ t.value = ""; });
+return;
+}
+ensureStudentOnRoster(t.value, { subject: g.subject });
+g.students.push(t.value);
 saveState(); renderSeatView();
 }
 return;
@@ -770,7 +1433,14 @@ return;
 }
 if(delGroup){
 const idx = groupRowIndex(delGroup);
-if(idx>-1){ block.groupRows.splice(idx,1); saveState(); renderSeatView(); }
+if(idx>-1){
+const g = block.groupRows[idx];
+const gname = (g && g.name) ? g.name : "（無名）";
+confirmThenBackup(`${currentDate} ${block.time || ""} の集団行「${gname}」を削除します（生徒 ${((g && g.students) || []).length} 名）。よろしいですか？`, ()=>{
+block.groupRows.splice(idx,1);
+saveState(); renderSeatView();
+});
+}
 return;
 }
 if(removeG){
@@ -922,18 +1592,33 @@ eWeb（授業予定管理システム）の座席表ページで、ブックマ�
 }
 */
 const EWEB_SUBJECT_ABBR = {"数":"数学","英":"英語","国":"国語","理":"理科","社":"社会","化":"化学","物":"物理","生":"生物","地":"地学","現":"現代文","古":"古文","漢":"漢文","公":"公民"};
+const EWEB_PS1_RE = /(?:PS\s*1|ＰＳ\s*１|1\s*対\s*1|１\s*対\s*１|一\s*対\s*一)(?!\d)/i;
+function normalizeEwebSubjectText(raw){
+return String(raw || "")
+.replace(/&lt;/gi, "<")
+.replace(/&gt;/gi, ">")
+.replace(/[\uFF1C\u3008\u300A]/g, "<")
+.replace(/[\uFF1E\u3009\u300B]/g, ">")
+.replace(/\uFF08/g, "(")
+.replace(/\uFF09/g, ")")
+.replace(/[\u3000]+/g, " ")
+.trim();
+}
 function parseEwebSubject(raw){
-const s = (raw||"").trim();
-const m = s.match(/^(講|通)[\(<【\[]([^\)>】\]]+)[\)>】\]]$/);
+const s = normalizeEwebSubjectText(raw);
+const m = s.match(/^(講|通)\s*[<\(\[【]([^>\)\]】]+)[>\)\]】]$/);
 if(!m) return {subject: s, status: "normal"};
-const kind = m[1], code = m[2];
+const kind = m[1], code = m[2].replace(/\s+/g, "");
 const subject = EWEB_SUBJECT_ABBR[code] || code;
 return {subject, status: kind === "講" ? "course" : "normal"};
 }
-/* 1対1は通＋山括弧のみ。通(数)は1対2、講(数)は講習、集団は groups 側。 */
+/* 1対1は通＋山括弧。通(数)は1対2、講(数)は講習、集団は groups 側。
+   全角の ＜国＞ や 〈国〉 も山括弧として扱う。 */
 function isEwebSoloSubject(raw){
-const s = String(raw || "").trim();
-return /^通\s*[<\uFF1C][^>\uFF1E]+[>\uFF1E]$/.test(s);
+return /^通\s*<[^>]+>$/.test(normalizeEwebSubjectText(raw));
+}
+function isEwebPairSubject(raw){
+return /^通\s*\([^)]+\)$/.test(normalizeEwebSubjectText(raw));
 }
 function ewebItemSubject(it){
 if(!it) return "";
@@ -942,23 +1627,51 @@ if(it.raw && it.raw.subject_name) return it.raw.subject_name;
 if(it.subject_name) return it.subject_name;
 return "";
 }
+function ewebPs1Texts(koma, it){
+const out = [];
+function add(v){ if(v != null && String(v) !== "") out.push(String(v)); }
+function addTypeFields(obj){
+if(!obj) return;
+["name","type","type_name","class_type","class_type_name","lesson_type","lesson_form","form","form_name","style","style_name","kind","kind_name","ps","class_form","class_form_name"].forEach(k=> add(obj[k]));
+}
+if(koma){ add(koma.name); addTypeFields(koma); addTypeFields(koma.raw); }
+if(it){ add(it.subject); add(it.subject_name); addTypeFields(it.raw); }
+return out;
+}
+function looksLikeEwebPs1(koma, it){
+return ewebPs1Texts(koma, it).some(t=> EWEB_PS1_RE.test(t));
+}
+/* 科目の山括弧を最優先。通(数)や講習は1対1にしない。
+   科目に括弧がなくても、コマ名や種別が PS1 / 1対1 なら1対1。 */
+function isEwebSoloItem(it, koma){
+const rawSubj = ewebItemSubject(it);
+const s = normalizeEwebSubjectText(rawSubj);
+if(/^講\s*[<(【\[]/.test(s)) return false;
+if(isEwebSoloSubject(rawSubj)) return true;
+if(isEwebPairSubject(rawSubj)) return false;
+return looksLikeEwebPs1(koma, it);
+}
 function ewebSoloDisplaySubject(raw){
 const parsed = parseEwebSubject(raw);
 if(parsed.subject && parsed.subject !== String(raw || "").trim()) return parsed.subject;
-const m = String(raw || "").trim().match(/^通\s*[<\uFF1C]([^>\uFF1E]+)[>\uFF1E]$/);
+const m = normalizeEwebSubjectText(raw).match(/^通\s*<([^>]+)>$/);
 if(!m) return parsed.subject;
-return EWEB_SUBJECT_ABBR[m[1]] || m[1];
+return EWEB_SUBJECT_ABBR[m[1].replace(/\s+/g, "")] || m[1].replace(/\s+/g, "");
+}
+function ewebPayloadItems(payload){
+return (payload && (payload.items || payload.schedules)) || [];
 }
 function soloMapFromEwebPayload(payload){
 const map = {};
 if(!payload) return map;
-const items = payload.items || payload.schedules || [];
-items.forEach(it=>{
-const rawSubj = ewebItemSubject(it);
-if(!isEwebSoloSubject(rawSubj)) return;
+const komaMap = {};
+(payload.komas||[]).forEach(k=> { if(k && k.id != null) komaMap[k.id] = k; });
+ewebPayloadItems(payload).forEach(it=>{
+const koma = komaMap[it.koma_id];
+if(!isEwebSoloItem(it, koma)) return;
 const name = it.student_name || "";
 if(!name) return;
-map[soloComboKey(name, ewebSoloDisplaySubject(rawSubj))] = 1;
+map[soloComboKey(name, ewebSoloDisplaySubject(ewebItemSubject(it)))] = 1;
 });
 return map;
 }
@@ -983,7 +1696,7 @@ const komaMap = {};
 
 // individual items grouped by koma -> teacher
 const byKoma = {};
-(payload.items||[]).forEach(it=>{
+ewebPayloadItems(payload).forEach(it=>{
 byKoma[it.koma_id] = byKoma[it.koma_id] || [];
 byKoma[it.koma_id].push(it);
 });
@@ -1015,25 +1728,33 @@ byTeacher[key].push(it);
 Object.keys(byTeacher).forEach(teacherNameRaw=>{
 const teacherName = normalizeName(teacherNameRaw);
 const list = byTeacher[teacherNameRaw].slice().sort((a,b)=> (a.pos||0)-(b.pos||0));
+const solos = [], rest = [];
+list.forEach(it=> { if(isEwebSoloItem(it, koma)) solos.push(it); else rest.push(it); });
+function pushIndividualSeat(leftIt, rightIt){
 const seat = emptySeat(block.seats.length+1);
 seat.teacher = teacherName;
-if(list[0]){
-const p0 = parseEwebSubject(list[0].subject);
-seat.left = {student:normalizeName(list[0].student_name||""), subject:p0.subject, grade:list[0].grade||"", status:p0.status};
+if(leftIt){
+const p0 = parseEwebSubject(ewebItemSubject(leftIt));
+seat.left = {student:normalizeName(leftIt.student_name||""), subject:p0.subject, grade:leftIt.grade||leftIt.student_grade||"", status:p0.status};
 }
-if(list[1]){
-const p1 = parseEwebSubject(list[1].subject);
-seat.right = {student:normalizeName(list[1].student_name||""), subject:p1.subject, grade:list[1].grade||"", status:p1.status};
+if(rightIt){
+const p1 = parseEwebSubject(ewebItemSubject(rightIt));
+seat.right = {student:normalizeName(rightIt.student_name||""), subject:p1.subject, grade:rightIt.grade||rightIt.student_grade||"", status:p1.status};
 }
 block.seats.push(seat);
-// 3人以上が同じ講師・同じコマの場合は、3人目以降を集団行として追加
-if(list.length>2){
-const p2 = parseEwebSubject(list[2].subject);
+}
+/* PS1 / 通<科目> は1人で1席。同じ講師の別生徒と1対2にまとめない。 */
+solos.forEach(it=> pushIndividualSeat(it, null));
+if(rest[0]){
+pushIndividualSeat(rest[0], rest[1] || null);
+if(rest.length>2){
+const p2 = parseEwebSubject(ewebItemSubject(rest[2]));
 block.groupRows.push({
 id: uid(), seatNumber: "", name: "", teacher: teacherName,
 subject: p2.subject,
-students: list.slice(2).map(x=>normalizeName(x.student_name)).filter(Boolean)
+students: rest.slice(2).map(x=>normalizeName(x.student_name)).filter(Boolean)
 });
+}
 }
 });
 
@@ -1082,11 +1803,19 @@ state.days[dateStr] = newDay;
 migrate(state);
 currentDate = dateStr;
 saveEwebSoloMap(dateStr, soloMapFromEwebPayload(payload));
+const added = ensureRosterFromDay(newDay);
 saveState();
 renderTabs();
 renderSeatView();
 if(window.__repaintSolo){ try{ window.__repaintSolo(); }catch(e){} }
-showToast(`${dateStr} の座席表をeWebから取り込みました`);
+let msg = `${dateStr} の座席表をeWebから取り込みました`;
+if(added.students || added.teachers){
+const bits = [];
+if(added.students) bits.push(`生徒${added.students}名`);
+if(added.teachers) bits.push(`講師${added.teachers}名`);
+msg += `（名簿に${bits.join("・")}を追加）`;
+}
+showToast(msg);
 });
 });
 });
@@ -1159,8 +1888,18 @@ saveState(); renderStudentRows();
 });
 document.getElementById("btnPasteStudents").addEventListener("click", ()=> openPasteModal("students"));
 document.getElementById("btnAddStudent").addEventListener("click", ()=>{
+studentSearch = "";
+const searchEl = document.getElementById("studentSearch");
+if(searchEl) searchEl.value = "";
 state.students.push({id:uid(), name:"", birthdate:"", grade:"", subject:""});
-saveState(); renderStudentRows();
+saveState();
+renderTabs();
+renderStudentRows();
+const nameInput = document.querySelector("#studentRows tr:last-child .js-s-name");
+if(nameInput){
+nameInput.scrollIntoView({block:"nearest"});
+nameInput.focus();
+}
 });
 document.getElementById("btnDeleteSelectedStudents").addEventListener("click", ()=>{
 const ids = Array.from(document.querySelectorAll(".js-student-check:checked")).map(c=>c.dataset.id);
@@ -1209,6 +1948,7 @@ tbody.innerHTML = filtered.map(({s,i}, displayIdx)=>`
 tbody.querySelectorAll("tr").forEach(row=>{
 const idx = Number(row.dataset.index);
 row.querySelector(".js-s-name")?.addEventListener("input", e=>{ state.students[idx].name = e.target.value; saveState(); });
+row.querySelector(".js-s-name")?.addEventListener("change", e=>{ state.students[idx].name = String(e.target.value || "").trim(); e.target.value = state.students[idx].name; saveState(); });
 row.querySelector(".js-s-birth")?.addEventListener("change", e=>{ state.students[idx].birthdate = e.target.value; saveState(); });
 row.querySelector(".js-s-grade")?.addEventListener("input", e=>{ state.students[idx].grade = e.target.value; saveState(); });
 row.querySelector(".js-s-subject")?.addEventListener("change", e=>{ state.students[idx].subject = e.target.value; registerCustomSubject(e.target.value); saveState(); });
@@ -1560,7 +2300,12 @@ root.innerHTML = "";
 window.removeEventListener("afterprint", cleanup);
 };
 window.addEventListener("afterprint", cleanup);
+requestAnimationFrame(function(){
+requestAnimationFrame(function(){
+if(window.__fitPrintToPaper){ try{ window.__fitPrintToPaper(); }catch(e){} }
 window.print();
+});
+});
 }
 
 function openMultiDayPrintModal(){
@@ -1704,12 +2449,13 @@ ${day.blocks.map((block,bi)=> blockHtml(block, bi, currentDate)).join("")}
 applyPrintCssVars();
 bindImageDrag();
 if(window.__repaintSolo){ try{ window.__repaintSolo(); }catch(e){} }
+if(window.__syncPrintPreview){ try{ window.__syncPrintPreview(); }catch(e){} }
 
 document.getElementById("previewDatePicker").addEventListener("change", (e)=>{
 currentDate = e.target.value || todayStr();
 renderPrintPreviewView();
 });
-document.getElementById("btnPrintFromPreview").addEventListener("click", ()=> window.print());
+document.getElementById("btnPrintFromPreview").addEventListener("click", ()=> runMultiDayPrint([currentDate]));
 document.getElementById("btnPrintMultiFromPreview").addEventListener("click", openMultiDayPrintModal);
 document.getElementById("rangeSubjectSize").addEventListener("input", (e)=>{
 ps.subjectSize = Number(e.target.value);
@@ -1754,7 +2500,68 @@ saveState(); renderPrintPreviewView();
 /* =========================================================
 SETTINGS / BACKUP
 ========================================================= */
-const EWEB_BOOKMARKLET = `javascript:(async()=>{window.focus();const m=location.pathname.match(/schoolDay\\/(\\d+)/);const schoolId=m?m[1]:null;const dateInput=document.querySelector('input[type=date]');const date=dateInput?dateInput.value:null;if(!schoolId||!date){alert('学校IDまたは日付が取得できませんでした');return;}try{const res=await window.axios.post('/api/schedule/getSchoolSchedules/'+schoolId+'/'+date+'/'+date);const data=res.data;const komas=(data.date_komas||[]).flatMap(dk=>(dk.koma_set&&dk.koma_set.komas)||[]).map(k=>({id:k.id,name:k.name,start:k.start,end:k.end}));const items=(data.schedules||[]).map(s=>({koma_id:s.koma_id,teacher_name:s.teacher_name,student_name:s.student_name,grade:s.student_grade,subject:s.subject_name,pos:s.pos,flags:Object.keys(s).filter(function(k){return /\u632f\u66ff/.test(String(s[k]))}).map(function(k){return k+"="+String(s[k]).slice(0,40)}),raw:Object.keys(s).reduce(function(o,k){var v=s[k];if(v===null||typeof v!=="object"){if(k!=="student_name"&&k!=="teacher_name")o[k]=v;}return o;},{})}));const groups=(data.scheduleGroups||[]).map(g=>({koma_id:g.koma_id,start:g.start,end:g.end,name:g.group_class?g.group_class.name:'',teacher_name:(g.join_teachers&&g.join_teachers[0]&&g.join_teachers[0].teacher&&g.join_teachers[0].teacher.user)?g.join_teachers[0].teacher.user.name:'',students:(g.join_students||[]).map(js=>js.student?js.student.name:'').filter(Boolean)}));const payload={date,komas,items,groups};const json=JSON.stringify(payload);let copied=false;try{await navigator.clipboard.writeText(json);copied=true;}catch(e){copied=false;}if(copied){alert(date+' の予定を座席表アプリ用にコピーしました（個別'+items.length+'件／集団'+groups.length+'件）。座席表アプリの「eWebから読み込む」ボタンに貼り付けてください。');}else{window.prompt('自動コピーに失敗しました。下のテキストを全選択（Ctrl+A/Cmd+A）してコピーし、座席表アプリの「eWebから読み込む」に貼り付けてください：',json);}}catch(err){alert('取得に失敗しました: '+(err.response?err.response.status:err.message));}})();`;
+const EWEB_BOOKMARKLET = `javascript:(async()=>{window.focus();const m=location.pathname.match(/schoolDay\\/(\\d+)/);const schoolId=m?m[1]:null;const dateInput=document.querySelector('input[type=date]');const date=dateInput?dateInput.value:null;if(!schoolId||!date){alert('学校IDまたは日付が取得できませんでした');return;}try{const res=await window.axios.post('/api/schedule/getSchoolSchedules/'+schoolId+'/'+date+'/'+date);const data=res.data;const komas=(data.date_komas||[]).flatMap(dk=>(dk.koma_set&&dk.koma_set.komas)||[]).map(k=>({id:k.id,name:k.name,start:k.start,end:k.end,raw:Object.keys(k).reduce(function(o,key){var v=k[key];if(v===null||typeof v!=="object")o[key]=v;return o;},{})}));const items=(data.schedules||[]).map(s=>({koma_id:s.koma_id,teacher_name:s.teacher_name,student_name:s.student_name,grade:s.student_grade,subject:s.subject_name,pos:s.pos,flags:Object.keys(s).filter(function(k){return /\u632f\u66ff/.test(String(s[k]))}).map(function(k){return k+"="+String(s[k]).slice(0,40)}),raw:Object.keys(s).reduce(function(o,k){var v=s[k];if(v===null||typeof v!=="object"){if(k!=="student_name"&&k!=="teacher_name")o[k]=v;}return o;},{})}));const groups=(data.scheduleGroups||[]).map(g=>({koma_id:g.koma_id,start:g.start,end:g.end,name:g.group_class?g.group_class.name:'',teacher_name:(g.join_teachers&&g.join_teachers[0]&&g.join_teachers[0].teacher&&g.join_teachers[0].teacher.user)?g.join_teachers[0].teacher.user.name:'',students:(g.join_students||[]).map(js=>js.student?js.student.name:'').filter(Boolean)}));const payload={date,komas,items,groups};const json=JSON.stringify(payload);let copied=false;try{await navigator.clipboard.writeText(json);copied=true;}catch(e){copied=false;}if(copied){alert(date+' の予定を座席表アプリ用にコピーしました（個別'+items.length+'件／集団'+groups.length+'件）。座席表アプリの「eWebから読み込む」ボタンに貼り付けてください。');}else{window.prompt('自動コピーに失敗しました。下のテキストを全選択（Ctrl+A/Cmd+A）してコピーし、座席表アプリの「eWebから読み込む」に貼り付けてください：',json);}}catch(err){alert('取得に失敗しました: '+(err.response?err.response.status:err.message));}})();`;
+
+function isValidGoogleWebAppUrl(url){
+url = String(url || "").trim();
+return /^https:\/\/script\.google\.com\/(a\/[^/]+\/)?macros\/s\/[A-Za-z0-9_-]+\/exec\/?$/.test(url);
+}
+function openGoogleSetupModal(){
+const cfg = getGoogleBackupConfig() || { webAppUrl: "", token: "" };
+openModal(`
+<h3>Google自動バックアップの設定</h3>
+<p class="sub">WebアプリURLと合言葉を、この端末に保存します。教室IDは固定で、別教室には変更できません。先生のGoogleログインは不要です。</p>
+<label>教室ID
+<input type="text" id="googleClassroomId" value="${escapeHtml(CLASSROOM_ID)}" readonly style="width:100%;border:1px solid var(--line);border-radius:6px;padding:8px;margin:6px 0 12px;background:#f5f7fb;">
+</label>
+<label>WebアプリURL
+<input type="url" id="googleWebAppUrl" value="${escapeHtml(cfg.webAppUrl)}" placeholder="https://script.google.com/macros/s/…/exec" autocomplete="off" style="width:100%;border:1px solid var(--line);border-radius:6px;padding:8px;margin:6px 0 12px;">
+</label>
+<label>合言葉
+<input type="password" id="googleBackupToken" value="" placeholder="${cfg.token ? "（変更する場合のみ入力）" : "Apps Scriptに設定した合言葉"}" autocomplete="off" style="width:100%;border:1px solid var(--line);border-radius:6px;padding:8px;margin:6px 0 12px;">
+</label>
+<div class="modal-actions">
+<button class="btn" id="modalCancel">キャンセル</button>
+<button class="btn primary" id="modalConfirm">保存する</button>
+</div>
+`, (modal)=>{
+modal.querySelector("#modalCancel").addEventListener("click", closeModal);
+modal.querySelector("#modalConfirm").addEventListener("click", ()=>{
+const url = modal.querySelector("#googleWebAppUrl").value.trim();
+let token = modal.querySelector("#googleBackupToken").value;
+if(modal.querySelector("#googleClassroomId").value !== CLASSROOM_ID){
+showToast("教室IDは変更できません", true); return;
+}
+if(!isValidGoogleWebAppUrl(url)){ showToast("WebアプリURLの形式が正しくありません", true); return; }
+if(!token) token = cfg.token;
+if(!token){ showToast("合言葉を入力してください", true); return; }
+saveGoogleBackupConfig(url, token);
+closeModal();
+showToast("この教室のGoogleバックアップ設定を保存しました");
+if(currentTab === "settings") renderSettingsView();
+runGoogleBackup(true);
+});
+});
+}
+function restoreFromGoogleBackup(){
+confirmDialog("Googleに保存された最新バックアップで、この端末の座席表・名簿・設定を置き換えます。現在この端末にのみある変更は失われます。", ()=>{
+if(!getGoogleBackupConfig()){ showToast("先にGoogleバックアップを設定してください", true); return; }
+showToast("Googleから復元しています…");
+postGoogleBackupApi("restore").then(data=>{
+if(data.classroomId && data.classroomId !== CLASSROOM_ID){
+showToast("別教室のバックアップは復元できません", true);
+return;
+}
+if(!data.json || typeof data.json !== "object"){ showToast("復元データが空でした", true); return; }
+state = migrate(data.json);
+saveState();
+showToast("復元しました。画面を再読み込みします");
+setTimeout(()=>{ location.reload(); }, 400);
+}).catch(err=>{
+showToast(googleErrorMessage(err && err.message), true);
+});
+});
+}
 
 function renderSettingsView(){
 const el = document.getElementById("view-settings");
@@ -1763,6 +2570,19 @@ el.innerHTML = `
 <p class="eyebrow">SETTINGS</p>
 <h2>設定・バックアップ</h2>
 <p class="sub">すべてのデータ（生徒名簿・講師名簿・座席配置・週ごとの座席表・曜日プリセット）をまとめてバックアップ・復元できます。</p>
+</div>
+<div class="panel settings-card" style="grid-column:1/-1;">
+<h3>Google授業履歴</h3>
+<p>座席表・名簿・設定を、この教室専用のGoogleドライブへ自動保存します。座席表画面の「授業履歴」から過去の記録を確認できます。先生のGoogleログインは不要です。</p>
+<p><strong>教室ID：</strong><code>${escapeHtml(CLASSROOM_ID)}</code>（固定。別教室には変更できません）</p>
+<p><strong>WebアプリURL：</strong>${getGoogleBackupConfig() ? escapeHtml(getGoogleBackupConfig().webAppUrl) : "未設定"}</p>
+<p><strong>合言葉：</strong>${getGoogleBackupConfig() ? "この端末に保存済み" : "未設定"}</p>
+<div id="googleBackupStatusBox">${googleBackupStatusHtml(loadGoogleBackupStatus())}</div>
+<div class="btn-row" style="margin-top:10px; display:flex; flex-wrap:wrap; gap:8px;">
+<button class="btn" id="btnGoogleBackupSetup">設定する</button>
+<button class="btn" id="btnGoogleBackupNow">今すぐ履歴保存</button>
+<button class="btn primary" id="btnGoogleBackupRestore">最新履歴から復元</button>
+</div>
 </div>
 <div class="settings-grid">
 <div class="panel settings-card">
@@ -1789,6 +2609,17 @@ el.innerHTML = `
 </div>
 </div>
 `;
+document.getElementById("btnGoogleBackupSetup").addEventListener("click", openGoogleSetupModal);
+document.getElementById("btnGoogleBackupNow").addEventListener("click", ()=>{
+if(!getGoogleBackupConfig()){ showToast("先に「設定する」からURLと合言葉を保存してください", true); return; }
+showToast("Googleへバックアップしています…");
+runGoogleBackup(true).then(()=>{
+const s = loadGoogleBackupStatus();
+if(s.phase === "error") showToast(googleErrorMessage(s.lastError), true);
+else showToast("Googleへバックアップしました");
+});
+});
+document.getElementById("btnGoogleBackupRestore").addEventListener("click", restoreFromGoogleBackup);
 document.getElementById("btnExport").addEventListener("click", ()=>{
 const blob = new Blob([JSON.stringify(state, null, 2)], {type:"application/json"});
 const url = URL.createObjectURL(blob);
@@ -1830,6 +2661,7 @@ initTabs();
 initPastePreview();
 renderTabs();
 renderCurrentView();
+applyGoogleBackupUi();
 }
 document.addEventListener("DOMContentLoaded", init);
 
@@ -1874,6 +2706,7 @@ document.addEventListener("DOMContentLoaded", init);
       try { STORAGE.setItem(KEY, String(nv)); } catch(e){}
       apply(nv);
       lab.textContent = text(nv);
+      if (window.__syncPrintPreview){ try{ window.__syncPrintPreview(); }catch(e){} }
     });
     row.appendChild(lab);
     row.appendChild(input);
@@ -2441,7 +3274,7 @@ document.addEventListener("DOMContentLoaded", init);
     p.textContent = "1行に1人。「氏名 生年月日」の形か、生年月日だけ（名簿の並び順に対応）。氏名は空白の有無を無視して照合します。日付は 2011/5/3・2011-5-3・2011年5月3日 のいずれでも可。";
     var ta = document.createElement("textarea");
     ta.rows = 6; ta.style.width = "100%";
-    ta.placeholder = "大利 幸之介\t2011/05/03\n藤井 章聡 2011-6-14";
+    ta.placeholder = "山田 太郎\t2012/04/02\n佐藤 花子 2013-5-15";
     var row = document.createElement("div");
     row.style.display = "flex"; row.style.gap = "8px"; row.style.alignItems = "center";
     row.style.marginTop = "8px"; row.style.flexWrap = "wrap";
@@ -2675,7 +3508,7 @@ document.addEventListener("DOMContentLoaded", init);
       st.id = SID;
       document.head.appendChild(st);
     }
-    st.textContent = "@page{ size: A3 " + v + "; margin: 8mm; }";
+    st.textContent = "@page{ size: A3 " + v + "; margin: 10mm; }";
   }
   function inject(){
     var bar = document.querySelector(".print-panel-toggle");
@@ -2857,6 +3690,103 @@ document.addEventListener("DOMContentLoaded", init);
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", inject);
   else { try { inject(); } catch(e){} }
   setInterval(function(){ try { inject(); } catch(e){} }, 1500);
+})();
+
+/* ==========================================================
+   印刷直前に紙面へ収める。固定mm幅や授業枠の高さで
+   コピー機の印字領域からはみ出すのを防ぐ。
+   ========================================================== */
+(function(){
+  var applied = [];
+  /* コピー機は @page 余白より内側しか印字できない。実寸ぴったりだと必ずはみ出す。 */
+  var SAFETY = 0.86;
+  function userScale(){
+    var v = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--print-page-scale"));
+    return (isFinite(v) && v > 0.2) ? v : 1;
+  }
+  function paperPx(){
+    var cs = getComputedStyle(document.documentElement);
+    var mm = function(name){
+      var n = parseFloat(cs.getPropertyValue(name));
+      return isFinite(n) && n > 0 ? n : 0;
+    };
+    var px = 96 / 25.4;
+    return {
+      w: (mm("--paper-w") || 404) * px,
+      h: (mm("--paper-h") || 281) * px
+    };
+  }
+  function boxes(){
+    if (document.body.classList.contains("multi-day-print")){
+      return Array.prototype.slice.call(document.querySelectorAll(".multi-print-page"));
+    }
+    var preview = document.querySelector("#view-print:not([hidden]) .print-preview-page");
+    if (preview) return [preview];
+    var seat = document.querySelector("#view-seat:not([hidden])");
+    return seat ? [seat] : [];
+  }
+  function fitBox(box){
+    var blocks = box.querySelector(".blocks");
+    if (!blocks) return;
+    blocks.style.transform = "none";
+    blocks.style.width = "100%";
+    var paper = paperPx();
+    var w = paper.w;
+    var h = paper.h;
+    var head = box.querySelector(".page-head");
+    var headH = 0;
+    if (head){
+      var pageScale = 1;
+      var tr = getComputedStyle(box).transform;
+      if (tr && tr !== "none"){
+        var m = tr.match(/matrix\(([^,]+)/);
+        if (m) pageScale = Math.abs(parseFloat(m[1])) || 1;
+      }
+      headH = head.getBoundingClientRect().height / pageScale;
+    }
+    var availW = Math.max(1, w);
+    var availH = Math.max(1, h - headH);
+    var need = Math.min(1, availW / Math.max(1, blocks.scrollWidth), availH / Math.max(1, blocks.scrollHeight));
+    var s = Math.min(userScale(), need) * SAFETY;
+    if (s < 0.35) s = 0.35;
+    if (s > 1) s = 1;
+    blocks.style.transformOrigin = "top left";
+    blocks.style.transform = "scale(" + s + ")";
+    blocks.style.width = (100 / s) + "%";
+    applied.push(blocks);
+    return blocks;
+  }
+  function fit(){
+    window.__suspendPreviewFit = true;
+    applied = [];
+    boxes().forEach(fitBox);
+  }
+  function syncPreview(){
+    var preview = document.querySelector("#view-print:not([hidden]) .print-preview-page");
+    if (!preview) return;
+    applied = applied.filter(function(el){ return el && el.isConnected && !preview.contains(el); });
+    fitBox(preview);
+    window.__suspendPreviewFit = false;
+    window.dispatchEvent(new Event("resize"));
+  }
+  function clear(){
+    applied.forEach(function(el){
+      if (!el || !el.isConnected) return;
+      if (el.closest && el.closest("#view-print")) return;
+      el.style.transform = "";
+      el.style.width = "";
+    });
+    applied = applied.filter(function(el){ return el && el.isConnected && el.style.transform; });
+    window.__suspendPreviewFit = false;
+    syncPreview();
+  }
+  window.addEventListener("beforeprint", fit);
+  window.addEventListener("afterprint", clear);
+  window.__fitPrintToPaper = fit;
+  window.__syncPrintPreview = syncPreview;
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", function(){ setTimeout(syncPreview, 200); });
+  else setTimeout(syncPreview, 200);
+  setInterval(function(){ try { syncPreview(); } catch(e){} }, 1500);
 })();
 
 /* ==========================================================
